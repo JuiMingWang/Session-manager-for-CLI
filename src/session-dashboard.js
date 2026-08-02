@@ -369,6 +369,34 @@ function scanCodex(codexHomeDir, realHomeDir = os.homedir()) {
 }
 
 // ---------------------------------------------------------------------------
+// Deduplication
+// ---------------------------------------------------------------------------
+//
+// Claude Code stores a session's jsonl file keyed by the project folder it was
+// CURRENTLY running from. When a project folder is moved or copied to a new
+// location and the same session is resumed from there, Claude Code writes a
+// fresh copy of that session's jsonl file under the new project folder — the
+// old copy is left in place, not cleaned up. Confirmed on real data: the same
+// session id can physically exist as 2-3 separate files under different
+// ~/.claude/projects/<encoded-path>/ folders, each scanned as its own card.
+// Collapse entries sharing the same (tool, id) down to one, keeping the copy
+// with the latest lastActiveAt (mtime) — on real duplicate files, the
+// newest-mtime copy was also the most complete one (more lines), since that's
+// the location the session kept being used from.
+
+function dedupeSessions(sessions) {
+  const byKey = new Map();
+  for (const session of sessions) {
+    const key = `${session.tool}:${session.id}`;
+    const existing = byKey.get(key);
+    if (!existing || new Date(session.lastActiveAt) > new Date(existing.lastActiveAt)) {
+      byKey.set(key, session);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+// ---------------------------------------------------------------------------
 // HTML dashboard builder
 // ---------------------------------------------------------------------------
 
@@ -386,6 +414,7 @@ function buildHtml(sessions, meta = {}) {
   body { font-family: system-ui, sans-serif; margin: 2rem; color: #222; }
   .card { border: 1px solid #ccc; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
   .group-title { font-weight: bold; margin-top: 1.5rem; }
+  .group-path { color: #888; font-size: 0.8rem; margin: 0.2rem 0 0.5rem; font-family: monospace; }
   .meta { color: #666; font-size: 0.85rem; }
   button.copy-btn { cursor: pointer; margin-top: 0.4rem; }
   #controls > * { margin-right: 0.5rem; }
@@ -447,44 +476,93 @@ function buildHtml(sessions, meta = {}) {
 
       filtered.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
 
+      function renderCard(s) {
+        var card = document.createElement('div');
+        card.className = 'card';
+
+        var titleEl = document.createElement('div');
+        titleEl.textContent = '[' + s.tool + '] ' + s.title;
+        card.appendChild(titleEl);
+
+        var metaEl = document.createElement('div');
+        metaEl.className = 'meta';
+        metaEl.textContent = '最後互動：' + s.lastActiveAt + '　開始：' + s.startedAt + (s.branch ? '　branch：' + s.branch : '');
+        card.appendChild(metaEl);
+
+        var btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.textContent = '複製續接指令';
+        btn.addEventListener('click', function () {
+          // Single-quoted PowerShell string, matching buildResumeCommand's escaping in session-dashboard.js:
+          // double-quoted strings would let a real folder name containing $ or a backtick corrupt the command.
+          var safeCwd = String(s.cwd).replace(/'/g, "''");
+          var cmd = "Set-Location -LiteralPath '" + safeCwd + "'; " + (s.tool === 'codex' ? 'codex resume' : 'claude --resume') + ' ' + s.id;
+          navigator.clipboard.writeText(cmd);
+        });
+        card.appendChild(btn);
+
+        app.appendChild(card);
+      }
+
+      function mostRecentTime(items) {
+        return items.reduce(function (max, s) {
+          var t = new Date(s.lastActiveAt).getTime();
+          return t > max ? t : max;
+        }, 0);
+      }
+
       var groups = new Map();
       filtered.forEach(function (s) {
         if (!groups.has(s.groupKey)) groups.set(s.groupKey, []);
         groups.get(s.groupKey).push(s);
       });
 
+      // Cluster path-groups that share the same project name (e.g. the same project moved or
+      // copied across drives over time — a real, observed pattern, not a hypothetical) so they
+      // render together under one shared heading instead of looking like unrelated, unexplained
+      // duplicate sections. Each sub-block still shows its own real path (address), since that's
+      // the only thing that actually distinguishes them from one another.
+      var MISC_CLUSTER_KEY = '__misc_cluster__';
+      var clusters = new Map();
       groups.forEach(function (items, groupKey) {
-        var groupTitle = document.createElement('div');
-        groupTitle.className = 'group-title';
-        groupTitle.textContent = groupKey === '__misc__' ? '雜項/隨手' : items[0].displayName;
-        app.appendChild(groupTitle);
+        var label = groupKey === '__misc__' ? MISC_CLUSTER_KEY : items[0].displayName;
+        if (!clusters.has(label)) clusters.set(label, []);
+        clusters.get(label).push(items);
+      });
 
-        items.forEach(function (s) {
-          var card = document.createElement('div');
-          card.className = 'card';
+      var clusterEntries = Array.from(clusters.entries());
+      clusterEntries.sort(function (a, b) {
+        var aRecent = Math.max.apply(null, a[1].map(mostRecentTime));
+        var bRecent = Math.max.apply(null, b[1].map(mostRecentTime));
+        return bRecent - aRecent;
+      });
 
-          var titleEl = document.createElement('div');
-          titleEl.textContent = '[' + s.tool + '] ' + s.title;
-          card.appendChild(titleEl);
+      clusterEntries.forEach(function (entry) {
+        var label = entry[0];
+        var subGroups = entry[1];
+        subGroups.sort(function (a, b) { return mostRecentTime(b) - mostRecentTime(a); });
 
-          var metaEl = document.createElement('div');
-          metaEl.className = 'meta';
-          metaEl.textContent = '最後互動：' + s.lastActiveAt + '　開始：' + s.startedAt + (s.branch ? '　branch：' + s.branch : '');
-          card.appendChild(metaEl);
+        if (label === MISC_CLUSTER_KEY) {
+          var miscTitle = document.createElement('div');
+          miscTitle.className = 'group-title';
+          miscTitle.textContent = '雜項/隨手';
+          app.appendChild(miscTitle);
+          subGroups.forEach(function (items) { items.forEach(renderCard); });
+          return;
+        }
 
-          var btn = document.createElement('button');
-          btn.className = 'copy-btn';
-          btn.textContent = '複製續接指令';
-          btn.addEventListener('click', function () {
-            // Single-quoted PowerShell string, matching buildResumeCommand's escaping in session-dashboard.js:
-            // double-quoted strings would let a real folder name containing $ or a backtick corrupt the command.
-            var safeCwd = String(s.cwd).replace(/'/g, "''");
-            var cmd = "Set-Location -LiteralPath '" + safeCwd + "'; " + (s.tool === 'codex' ? 'codex resume' : 'claude --resume') + ' ' + s.id;
-            navigator.clipboard.writeText(cmd);
-          });
-          card.appendChild(btn);
+        var isClustered = subGroups.length > 1;
+        var header = document.createElement('div');
+        header.className = 'group-title';
+        header.textContent = isClustered ? label + '（' + subGroups.length + ' 個位置）' : label;
+        app.appendChild(header);
 
-          app.appendChild(card);
+        subGroups.forEach(function (items) {
+          var pathEl = document.createElement('div');
+          pathEl.className = 'group-path';
+          pathEl.textContent = items[0].cwd;
+          app.appendChild(pathEl);
+          items.forEach(renderCard);
         });
       });
     }
@@ -529,7 +607,7 @@ function main(argv, options = {}) {
 
   const claudeResult = scanClaudeCode(claudeHomeDir, homeDir);
   const codexResult = scanCodex(codexHomeDir, homeDir);
-  const sessions = [...claudeResult.sessions, ...codexResult.sessions];
+  const sessions = dedupeSessions([...claudeResult.sessions, ...codexResult.sessions]);
   const skippedCount = claudeResult.skipped + codexResult.skipped;
 
   const html = buildHtml(sessions, { generatedAt: new Date().toISOString(), skippedCount });
@@ -563,6 +641,7 @@ module.exports = {
   loadCodexIndex,
   scanCodexFile,
   scanCodex,
+  dedupeSessions,
   buildHtml,
   writeAtomic,
   main,

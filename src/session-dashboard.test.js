@@ -709,3 +709,85 @@ test('main groups a session whose cwd is the real home directory as misc, not it
   assert.equal(data.sessions[0].groupKey, '__misc__', 'a real home-directory session must be grouped as misc, not as its own project');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
+
+// Regression test for a real duplicate-card bug found during manual browser QA: Claude Code
+// stores a session's jsonl file keyed by the project folder it was CURRENTLY running from —
+// when a project folder is moved or copied to a new location and the same session is resumed
+// from there, Claude Code writes a fresh copy of that session's jsonl file under the new
+// project folder while leaving the old copy in place. Confirmed on this machine: the exact
+// same session id physically exists as 2-3 separate files under different
+// ~/.claude/projects/<encoded-path>/ folders. Our scanner walks all of them, so the same
+// conversation showed up as 2-3 identical-looking cards. dedupeSessions() collapses entries
+// sharing the same (tool, id) down to one, keeping the copy with the latest lastActiveAt
+// (mtime) — confirmed against the real duplicate files that the newest-mtime copy is also the
+// most complete one (more lines, i.e. the session kept being used from that location).
+const { dedupeSessions } = require('./session-dashboard.js');
+
+test('dedupeSessions collapses sessions sharing the same (tool, id), keeping the one with the latest lastActiveAt', () => {
+  const older = {
+    tool: 'claude-code',
+    id: 'shared-id',
+    title: '舊的複本',
+    cwd: 'C:\\Users\\sjack\\OneDrive\\Documents\\proj',
+    branch: null,
+    groupKey: 'c:/users/sjack/onedrive/documents/proj',
+    displayName: 'proj',
+    startedAt: '2026-07-29T00:00:00.000Z',
+    lastActiveAt: '2026-07-29T00:31:46.000Z',
+  };
+  const newer = {
+    ...older,
+    title: '新的複本（專案已搬到本機）',
+    cwd: 'C:\\Users\\sjack\\Documents\\proj',
+    groupKey: 'c:/users/sjack/documents/proj',
+    lastActiveAt: '2026-08-01T01:51:46.000Z',
+  };
+  const unrelated = { ...older, id: 'a-different-id' };
+
+  const result = dedupeSessions([older, newer, unrelated]);
+  assert.equal(result.length, 2);
+  const kept = result.find((s) => s.id === 'shared-id');
+  assert.equal(kept.lastActiveAt, newer.lastActiveAt);
+  assert.equal(kept.title, '新的複本（專案已搬到本機）');
+});
+
+test('dedupeSessions does not collapse sessions with the same id but different tools', () => {
+  const claudeSession = {
+    tool: 'claude-code', id: 'x', title: 't', cwd: 'C:\\p', branch: null,
+    groupKey: 'c:/p', displayName: 'p', startedAt: '2026-01-01T00:00:00.000Z', lastActiveAt: '2026-01-01T00:00:00.000Z',
+  };
+  const codexSession = { ...claudeSession, tool: 'codex' };
+  const result = dedupeSessions([claudeSession, codexSession]);
+  assert.equal(result.length, 2);
+});
+
+test('main deduplicates a session whose jsonl file exists under two different project folders, keeping the more recently active copy', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const codexHomeDir = pathForTests.join(dir, 'codex-home-missing');
+  const sharedId = 'duplicated-across-folders';
+
+  const oldFile = pathForTests.join(claudeHomeDir, 'projects', 'onedrive-copy', `${sharedId}.jsonl`);
+  writeJsonl(oldFile, [
+    { type: 'user', cwd: 'C:\\Users\\sjack\\OneDrive\\Documents\\proj', message: { content: '這是搬家前的舊路徑版本' } },
+  ]);
+  const newFile = pathForTests.join(claudeHomeDir, 'projects', 'local-copy', `${sharedId}.jsonl`);
+  writeJsonl(newFile, [
+    { type: 'user', cwd: 'C:\\Users\\sjack\\Documents\\proj', message: { content: '這是搬家後的新路徑版本' } },
+  ]);
+  // Force a deterministic mtime ordering instead of relying on wall-clock timing between
+  // two back-to-back writes, which could tie on a fast filesystem.
+  const oldTime = new Date('2026-07-29T00:31:46.000Z');
+  const newTime = new Date('2026-08-01T01:51:46.000Z');
+  fsForTests.utimesSync(oldFile, oldTime, oldTime);
+  fsForTests.utimesSync(newFile, newTime, newTime);
+
+  const result = main(['--quiet'], { claudeHomeDir, codexHomeDir, openBrowser: () => {} });
+  assert.equal(result.sessionCount, 1, 'the two physical copies must collapse into one session');
+  const html = fsForTests.readFileSync(result.targetPath, 'utf8');
+  const dataMatch = html.match(/var DATA = (.*);\n\s*\(function/);
+  const data = JSON.parse(dataMatch[1].replace(/\\u003c/g, '<').replace(/\\u003e/g, '>'));
+  assert.equal(data.sessions.length, 1);
+  assert.equal(data.sessions[0].title, '這是搬家後的新路徑版本', 'must keep the more recently active copy');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
