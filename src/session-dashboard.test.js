@@ -304,3 +304,69 @@ test('scanClaudeCode returns empty result when the projects directory does not e
   assert.equal(skipped, 0);
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
+
+const {
+  extractResponseItemText,
+  isSyntheticCodexText,
+  extractCodexTitle,
+  loadCodexIndex,
+} = require('./session-dashboard.js');
+
+test('extractResponseItemText extracts input_text items only', () => {
+  const payload = { content: [{ type: 'input_text', text: '幫我修一下這個 bug' }] };
+  assert.equal(extractResponseItemText(payload), '幫我修一下這個 bug');
+});
+
+test('extractResponseItemText returns empty string for non-array content', () => {
+  assert.equal(extractResponseItemText({ content: 'not an array' }), '');
+  assert.equal(extractResponseItemText({}), '');
+});
+
+test('isSyntheticCodexText flags known injected prefixes observed in real rollout files', () => {
+  assert.equal(isSyntheticCodexText('<environment_context>\n  <cwd>...'), true);
+  assert.equal(isSyntheticCodexText('<recommended_plugins>\nHere is a list...'), true);
+  assert.equal(isSyntheticCodexText('<permissions instructions>\nFilesystem sandboxing...'), true);
+  assert.equal(isSyntheticCodexText('# Context from my IDE setup:\n\n## Open tabs:'), true);
+  assert.equal(isSyntheticCodexText('幫我修一下這個 bug'), false);
+});
+
+test('extractCodexTitle only considers response_item/message/role=user records', () => {
+  const records = [
+    { type: 'session_meta', payload: { id: 'x' } },
+    { type: 'event_msg', payload: { type: 'task_started' } },
+    { type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: '<permissions instructions>...' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>...' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '幫我修一下這個 bug' }] } },
+  ];
+  assert.equal(extractCodexTitle(records), '幫我修一下這個 bug');
+});
+
+test('extractCodexTitle returns null when nothing genuine found within maxScan', () => {
+  const records = Array.from({ length: 20 }, () => ({
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>...' }] },
+  }));
+  assert.equal(extractCodexTitle(records, 20), null);
+});
+
+test('loadCodexIndex builds an id -> thread_name map, later duplicate wins', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'session_index.jsonl');
+  fsForTests.writeFileSync(
+    filePath,
+    [
+      JSON.stringify({ id: 'aaa', thread_name: '舊名稱', updated_at: '2026-01-01T00:00:00Z' }),
+      JSON.stringify({ id: 'bbb', thread_name: '另一個', updated_at: '2026-01-01T00:00:00Z' }),
+      JSON.stringify({ id: 'aaa', thread_name: '新名稱', updated_at: '2026-02-01T00:00:00Z' }),
+    ].join('\n'),
+    'utf8'
+  );
+  const map = loadCodexIndex(filePath);
+  assert.equal(map.get('aaa'), '新名稱');
+  assert.equal(map.get('bbb'), '另一個');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('loadCodexIndex returns an empty map when the index file does not exist', () => {
+  assert.equal(loadCodexIndex('C:\\does\\not\\exist.jsonl').size, 0);
+});

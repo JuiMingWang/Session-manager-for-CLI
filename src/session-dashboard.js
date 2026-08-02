@@ -232,6 +232,63 @@ function scanClaudeCode(claudeHomeDir) {
   return { sessions, skipped };
 }
 
+// ---------------------------------------------------------------------------
+// Codex adapter — title extraction and index
+// ---------------------------------------------------------------------------
+
+const CODEX_SYNTHETIC_PREFIXES = [
+  '<environment_context>',
+  '<recommended_plugins>',
+  '<permissions instructions>',
+  '# Context from my IDE setup:',
+];
+
+function extractResponseItemText(payload) {
+  const content = payload && payload.content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((item) => item && item.type === 'input_text')
+    .map((item) => item.text || '')
+    .join('\n');
+}
+
+function isSyntheticCodexText(text) {
+  const trimmed = String(text).trim();
+  if (!trimmed) return true;
+  return CODEX_SYNTHETIC_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+function extractCodexTitle(records, maxScan = 20) {
+  for (const record of records.slice(0, maxScan)) {
+    if (record.type !== 'response_item') continue;
+    const payload = record.payload;
+    if (!payload || payload.type !== 'message' || payload.role !== 'user') continue;
+    const text = extractResponseItemText(payload);
+    if (isSyntheticCodexText(text)) continue;
+    return text.trim().slice(0, 120);
+  }
+  return null;
+}
+
+function loadCodexIndex(indexFilePath) {
+  const map = new Map();
+  if (!fs.existsSync(indexFilePath)) return map;
+  const content = fs.readFileSync(indexFilePath, 'utf8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj.id === 'string') {
+        map.set(obj.id, obj.thread_name);
+      }
+    } catch (err) {
+      // Malformed line — skip it.
+    }
+  }
+  return map;
+}
+
 module.exports = {
   escapeHtml,
   embedJsonSafely,
@@ -248,4 +305,8 @@ module.exports = {
   walkJsonlFiles,
   scanClaudeCodeFile,
   scanClaudeCode,
+  extractResponseItemText,
+  isSyntheticCodexText,
+  extractCodexTitle,
+  loadCodexIndex,
 };
