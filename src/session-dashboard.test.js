@@ -878,6 +878,36 @@ test('buildHtml marks a pathExists:false card with a warning label and greyscale
   assert.ok(btn, 'pathExists:false 卡片的複製按鈕仍須存在，不可被隱藏或移除');
 });
 
+test('buildHtml renders a distinct tool-badge class for claude-code vs codex sessions', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'cc', title: 'cc title', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+    {
+      tool: 'codex', id: 'cx', title: 'cx title', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEl = app.children.find((el) => el.tagName === 'DETAILS');
+  const bodyDiv = detailsEl.children.find((el) => el.tagName === 'DIV');
+  const cards = bodyDiv.children.filter((el) => el.className.indexOf('card') !== -1);
+  assert.equal(cards.length, 2);
+  const ccCard = cards.find((c) => c.children[0].textContent.indexOf('cc title') !== -1);
+  const cxCard = cards.find((c) => c.children[0].textContent.indexOf('cx title') !== -1);
+  const ccBadge = ccCard.children[0].children.find((el) => el.className.indexOf('tool-badge') !== -1);
+  const cxBadge = cxCard.children[0].children.find((el) => el.className.indexOf('tool-badge') !== -1);
+  assert.ok(ccBadge, 'claude-code 卡片標題應包含色塊徽章元素');
+  assert.ok(cxBadge, 'codex 卡片標題應包含色塊徽章元素');
+  assert.notEqual(ccBadge.className, cxBadge.className, 'claude-code 與 codex 的色塊徽章應套用不同 class 以呈現不同顏色');
+  assert.equal(ccBadge.className, 'tool-badge tool-badge-claude-code');
+  assert.equal(cxBadge.className, 'tool-badge tool-badge-codex');
+});
+
 const { writeAtomic } = require('./session-dashboard.js');
 
 test('writeAtomic writes the final content to the target path', () => {

@@ -428,6 +428,9 @@ function buildHtml(sessions, meta = {}) {
   .title-fallback { color: #888; font-style: italic; }
   .card-path-missing { filter: grayscale(1); opacity: 0.7; }
   .path-missing-warning { color: #a33; font-weight: bold; }
+  .tool-badge { display: inline-block; width: 0.7em; height: 0.7em; border-radius: 3px; margin-left: 0.4em; vertical-align: middle; border: 1px solid rgba(0,0,0,0.25); }
+  .tool-badge-claude-code { background: #d97706; }
+  .tool-badge-codex { background: #2563eb; }
   button.copy-btn { cursor: pointer; margin-top: 0.4rem; }
   #controls > * { margin-right: 0.5rem; }
 </style>
@@ -495,6 +498,9 @@ function buildHtml(sessions, meta = {}) {
         var titleEl = document.createElement('div');
         titleEl.textContent = '[' + s.tool + '] ' + s.title;
         if (s.titleIsFallback) titleEl.className = 'title-fallback';
+        var badgeEl = document.createElement('span');
+        badgeEl.className = 'tool-badge tool-badge-' + s.tool;
+        titleEl.appendChild(badgeEl);
         card.appendChild(titleEl);
 
         if (s.pathExists === false) {

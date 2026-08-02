@@ -41,3 +41,10 @@
 - 測試數：78 → 83（全部通過，無既有測試被破壞）。
 - 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。字串檢查確認產出的 `sessions-dashboard.html` 內 `"pathExists":false` 出現 18 次、`"pathExists":true` 出現 262 次，`card-path-missing`／「資料夾已不存在」字樣皆存在於產出的 HTML 中。
 - 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項）——本次同樣維持 `--quiet` 不開瀏覽器，僅以字串比對驗證真實資料產出結果，實際灰階視覺效果與警告標籤排版留待使用者或下次工作階段人工確認。
+
+## 2026-08-02T15:34:13Z
+- 實作 ticket 03（工具來源色塊標記）：`renderCard` 在既有的 `[claude-code]`／`[codex]` 文字前綴標題 div 內，追加一個純色小色塊 `<span class="tool-badge tool-badge-claude-code">` 或 `tool-badge-codex`（0.7em 圓角方塊、附一層淡邊框以在淺色卡片背景上保持可辨識輪廓），不移除原本的文字前綴——文字前綴本身即滿足「不可只靠顏色辨識」的無障礙要求，色塊僅作為輔助的一眼掃視訊號。新增 CSS class `.tool-badge`／`.tool-badge-claude-code`（`#d97706` 橙色）／`.tool-badge-codex`（`#2563eb` 藍色），純 CSS 實作、無外部圖示庫或字型。橙／藍兩色在淺色模式下彼此對比明顯，也是色覺辨識中較易區分的組合；深色模式尚未實作，依 ticket 說明本輪不處理。
+- 嚴格 TDD：先新增一個透過既有 `runDashboardScript`/`makeFakeElement` DOM 執行手法建立一組 `claude-code`＋一組 `codex` session、驗證兩者標題 div 內都各自產生 `.tool-badge` 子元素、且 class 名稱彼此不同（`tool-badge-claude-code` vs `tool-badge-codex`）的測試，先跑過確認會失敗（red），再實作最小改動讓其通過（green）。色塊以 `titleEl.appendChild()` 掛在標題文字節點之後，不改動 `card.children[0]`／`titleEl.textContent`／`titleEl.className` 的既有結構，因此 ticket 01／02 既有斷言（依賴 `card.children[0]` 就是標題 div）完全不受影響。
+- 測試數：83 → 84（全部通過，無既有測試被破壞）。
+- 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。字串檢查確認產出的 `sessions-dashboard.html` 內共 47 筆 `"tool":"claude-code"`、233 筆 `"tool":"codex"`（合計 280 筆 session），且 `.tool-badge`／`.tool-badge-claude-code`／`.tool-badge-codex` 三條 CSS 規則皆存在於內嵌 `<style>` 區塊。
+- 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項）——本次同樣維持 `--quiet` 不開瀏覽器，色塊是由前端 script 於執行時動態產生（不會出現在靜態 HTML 原始碼中），僅能以 DOM 測試與 CSS 規則存在性驗證邏輯正確，橙／藍兩色實際並排呈現的視覺效果與淺色模式下的清晰度留待使用者或下次工作階段人工確認。
