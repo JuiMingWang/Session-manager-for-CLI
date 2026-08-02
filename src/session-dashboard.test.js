@@ -370,3 +370,99 @@ test('loadCodexIndex builds an id -> thread_name map, later duplicate wins', () 
 test('loadCodexIndex returns an empty map when the index file does not exist', () => {
   assert.equal(loadCodexIndex('C:\\does\\not\\exist.jsonl').size, 0);
 });
+
+const { scanCodexFile, scanCodex } = require('./session-dashboard.js');
+
+test('scanCodexFile prefers the session_index thread_name when present', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', '2026', '07', '10', 'rollout-x.jsonl');
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-1', cwd: 'C:\\work\\api', git: { branch: 'master' } } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>...' }] } },
+  ]);
+  const indexMap = new Map([['sess-1', '修 API bug']]);
+  const session = scanCodexFile(filePath, indexMap, 'C:\\Users\\sjack');
+  assert.equal(session.tool, 'codex');
+  assert.equal(session.id, 'sess-1');
+  assert.equal(session.title, '修 API bug');
+  assert.equal(session.cwd, 'C:\\work\\api');
+  assert.equal(session.branch, 'master');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile falls back to file-scan title, then basename+timestamp, when index has no entry', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-y.jsonl');
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-2', cwd: 'C:\\work\\other', git: {} } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '幫我加個功能' }] } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.equal(session.title, '幫我加個功能');
+  assert.equal(session.branch, null, 'empty git object has no branch');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile handles a missing session_meta record gracefully', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-z.jsonl');
+  writeJsonl(filePath, [
+    { type: 'event_msg', payload: { type: 'task_started' } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.equal(session.id, 'rollout-z');
+  assert.equal(session.cwd, 'C:\\Users\\sjack');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile throws when the file contains zero parseable JSON records', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'garbage.jsonl');
+  fsForTests.mkdirSync(pathForTests.dirname(filePath), { recursive: true });
+  fsForTests.writeFileSync(filePath, 'not json\nstill not json', 'utf8');
+  assert.throws(() => scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack'));
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodex reads both sessions/ (nested) and archived_sessions/ (flat), dedupes via index once', () => {
+  const dir = makeTempDir();
+  writeJsonl(pathForTests.join(dir, 'sessions', '2026', '07', '10', 'rollout-a.jsonl'), [
+    { type: 'session_meta', payload: { id: 'a1', cwd: 'C:\\work\\proj' } },
+  ]);
+  writeJsonl(pathForTests.join(dir, 'archived_sessions', 'rollout-b.jsonl'), [
+    { type: 'session_meta', payload: { id: 'b1', cwd: 'C:\\work\\proj' } },
+  ]);
+  writeJsonl(pathForTests.join(dir, 'session_index.jsonl'), [
+    { id: 'a1', thread_name: 'A 任務' },
+    { id: 'b1', thread_name: 'B 任務' },
+  ]);
+  const { sessions, skipped } = scanCodex(dir);
+  assert.equal(sessions.length, 2);
+  assert.equal(skipped, 0);
+  const titles = sessions.map((s) => s.title).sort();
+  assert.deepEqual(titles, ['A 任務', 'B 任務']);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodex returns empty result without throwing when ~/.codex does not exist', () => {
+  const dir = makeTempDir();
+  const missingCodexDir = pathForTests.join(dir, 'does-not-exist');
+  const { sessions, skipped } = scanCodex(missingCodexDir);
+  assert.deepEqual(sessions, []);
+  assert.equal(skipped, 0);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodex skips a file with zero parseable JSON and counts it, still returns the good ones', () => {
+  const dir = makeTempDir();
+  writeJsonl(pathForTests.join(dir, 'sessions', 'good.jsonl'), [
+    { type: 'session_meta', payload: { id: 'g1', cwd: 'C:\\work\\proj' } },
+  ]);
+  fsForTests.writeFileSync(pathForTests.join(dir, 'sessions', 'broken.jsonl'), 'not json\nstill not json', 'utf8');
+
+  const { sessions, skipped } = scanCodex(dir);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].id, 'g1');
+  assert.equal(skipped, 1);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});

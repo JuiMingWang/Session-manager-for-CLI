@@ -289,6 +289,58 @@ function loadCodexIndex(indexFilePath) {
   return map;
 }
 
+// ---------------------------------------------------------------------------
+// Codex adapter — file and directory scanning
+// ---------------------------------------------------------------------------
+
+function scanCodexFile(filePath, indexMap, homeDir) {
+  const records = readFirstJsonLines(filePath, 20);
+  if (records.length === 0) {
+    throw new Error(`no parseable JSON records found in ${filePath}`);
+  }
+  const metaRecord = records.find((r) => r.type === 'session_meta');
+  const payload = (metaRecord && metaRecord.payload) || {};
+  const id = payload.id || path.basename(filePath, '.jsonl');
+  const cwd = typeof payload.cwd === 'string' ? payload.cwd : homeDir;
+  const branch = payload.git && typeof payload.git.branch === 'string' ? payload.git.branch : null;
+  const stat = fs.statSync(filePath);
+
+  let title = indexMap.has(id) ? indexMap.get(id) : null;
+  if (!title) title = extractCodexTitle(records);
+  if (!title) title = `${displayNameForCwd(cwd)} (${stat.birthtime.toISOString()})`;
+
+  return {
+    tool: 'codex',
+    id,
+    title,
+    cwd,
+    branch,
+    groupKey: normalizeGroupKey(cwd, homeDir),
+    displayName: displayNameForCwd(cwd),
+    startedAt: stat.birthtime.toISOString(),
+    lastActiveAt: stat.mtime.toISOString(),
+  };
+}
+
+function scanCodex(codexHomeDir) {
+  if (!fs.existsSync(codexHomeDir)) return { sessions: [], skipped: 0 };
+  const indexMap = loadCodexIndex(path.join(codexHomeDir, 'session_index.jsonl'));
+  const files = [
+    ...walkJsonlFiles(path.join(codexHomeDir, 'sessions')),
+    ...walkJsonlFiles(path.join(codexHomeDir, 'archived_sessions')),
+  ];
+  const sessions = [];
+  let skipped = 0;
+  for (const file of files) {
+    try {
+      sessions.push(scanCodexFile(file, indexMap, codexHomeDir));
+    } catch (err) {
+      skipped += 1;
+    }
+  }
+  return { sessions, skipped };
+}
+
 module.exports = {
   escapeHtml,
   embedJsonSafely,
@@ -309,4 +361,6 @@ module.exports = {
   isSyntheticCodexText,
   extractCodexTitle,
   loadCodexIndex,
+  scanCodexFile,
+  scanCodex,
 };
