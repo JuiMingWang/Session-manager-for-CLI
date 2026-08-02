@@ -68,3 +68,121 @@ test('parseArgs detects --quiet', () => {
   assert.deepEqual(parseArgs([]), { quiet: false });
   assert.deepEqual(parseArgs(['--quiet']), { quiet: true });
 });
+
+const fsForTests = require('node:fs');
+const osForTests = require('node:os');
+const pathForTests = require('node:path');
+
+const {
+  readFirstJsonLines,
+  extractMessageText,
+  isSyntheticClaudeText,
+  extractClaudeTitle,
+} = require('./session-dashboard.js');
+
+function makeTempDir() {
+  return fsForTests.mkdtempSync(pathForTests.join(osForTests.tmpdir(), 'sdtest-'));
+}
+
+test('extractMessageText handles string content', () => {
+  assert.equal(extractMessageText({ content: 'hello world' }), 'hello world');
+});
+
+test('extractMessageText joins text-type array items and ignores tool_result items', () => {
+  const message = {
+    content: [
+      { type: 'tool_result', tool_use_id: 'x', content: 'some tool output' },
+    ],
+  };
+  assert.equal(extractMessageText(message), '', 'tool_result-only content yields no extractable text');
+});
+
+test('extractMessageText extracts text-type array items', () => {
+  const message = { content: [{ type: 'text', text: '我想討論一下這個問題' }] };
+  assert.equal(extractMessageText(message), '我想討論一下這個問題');
+});
+
+test('isSyntheticClaudeText flags known injected wrapper prefixes', () => {
+  assert.equal(isSyntheticClaudeText('<command-message>brainstorming</command-message>...'), true);
+  assert.equal(isSyntheticClaudeText('<local-command-caveat>Caveat: ...'), true);
+  assert.equal(isSyntheticClaudeText('<system-reminder>...'), true);
+  assert.equal(isSyntheticClaudeText('Base directory for this skill: C:\\...'), true);
+  assert.equal(isSyntheticClaudeText(''), true, 'empty text is not usable as a title');
+  assert.equal(isSyntheticClaudeText('我想討論一下 session 管理器怎麼做'), false);
+});
+
+test('isSyntheticClaudeText flags <command-name> and <local-command-stdout/stderr> — confirmed against real transcripts, where some invocations lead with <command-name> instead of <command-message>', () => {
+  // Real example from this machine: '<command-name>/plugin</command-name>\n<command-message>plugin</command-message>\n<command-args>marketplace add ...'
+  assert.equal(isSyntheticClaudeText('<command-name>/plugin</command-name>\n<command-message>plugin</command-message>'), true);
+  // Real example: '<local-command-stdout>Successfully added marketplace: openai-codex</local-command-stdout>'
+  assert.equal(isSyntheticClaudeText('<local-command-stdout>Successfully added marketplace: openai-codex</local-command-stdout>'), true);
+  assert.equal(isSyntheticClaudeText('<local-command-stderr>some error output</local-command-stderr>'), true);
+});
+
+test('extractClaudeTitle skips isMeta records and synthetic-wrapped records, picks first genuine human text', () => {
+  const records = [
+    { type: 'user', isMeta: true, message: { content: '<local-command-caveat>Caveat: ...' } },
+    { type: 'user', message: { content: '<command-message>brainstorming</command-message><command-args>我想討論session管理</command-args>' } },
+    { type: 'user', message: { content: [{ type: 'text', text: 'Base directory for this skill: C:\\...' }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: '這條不算，type 不是 user' }] } },
+    { type: 'user', message: { content: [{ type: 'text', text: '我想討論一下 session 管理器怎麼做' }] } },
+  ];
+  assert.equal(extractClaudeTitle(records), '我想討論一下 session 管理器怎麼做');
+});
+
+test('extractClaudeTitle returns null when no genuine record found within maxScan', () => {
+  const records = Array.from({ length: 25 }, () => ({
+    type: 'user',
+    isMeta: true,
+    message: { content: '<local-command-caveat>...' },
+  }));
+  assert.equal(extractClaudeTitle(records, 20), null);
+});
+
+test('extractClaudeTitle truncates long titles to 120 chars', () => {
+  const longText = 'a'.repeat(200);
+  const records = [{ type: 'user', message: { content: longText } }];
+  assert.equal(extractClaudeTitle(records).length, 120);
+});
+
+test('readFirstJsonLines skips unparseable lines but keeps parseable ones (truncated-file resilience)', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'truncated.jsonl');
+  const goodLine1 = JSON.stringify({ type: 'user', message: { content: 'first' } });
+  const goodLine2 = JSON.stringify({ type: 'user', message: { content: 'second' } });
+  const truncatedLine = '{"type":"user","message":{"content":"cut off mid-wr';
+  fsForTests.writeFileSync(filePath, `${goodLine1}\n${goodLine2}\n${truncatedLine}`, 'utf8');
+  const records = readFirstJsonLines(filePath, 20);
+  assert.equal(records.length, 2);
+  assert.equal(records[0].message.content, 'first');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readFirstJsonLines stops at n records and skips blank lines', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'many.jsonl');
+  const lines = Array.from({ length: 5 }, (_, i) => JSON.stringify({ n: i }));
+  fsForTests.writeFileSync(filePath, `\n${lines.join('\n\n')}\n`, 'utf8');
+  const records = readFirstJsonLines(filePath, 3);
+  assert.deepEqual(records.map((r) => r.n), [0, 1, 2]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readFirstJsonLines does not corrupt a multi-byte UTF-8 character straddling a 64KB chunk boundary', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'boundary.jsonl');
+  const CHUNK_SIZE = 64 * 1024;
+  const prefix = '{"type":"user","message":{"content":"';
+  const suffix = '中文測試"}}';
+  // Pad the line so the multi-byte suffix starts 2 bytes before the chunk boundary,
+  // guaranteeing the first character's 3-byte UTF-8 encoding is split across two reads.
+  const targetPrefixByteLength = CHUNK_SIZE - 2;
+  const filler = 'A'.repeat(Math.max(0, targetPrefixByteLength - Buffer.byteLength(prefix)));
+  fsForTests.writeFileSync(filePath, prefix + filler + suffix + '\n', 'utf8');
+
+  const records = readFirstJsonLines(filePath, 1);
+  assert.equal(records.length, 1);
+  assert.ok(records[0].message.content.endsWith('中文測試'), records[0].message.content.slice(-20));
+  assert.ok(!records[0].message.content.includes('�'), 'must not contain the UTF-8 replacement character');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
