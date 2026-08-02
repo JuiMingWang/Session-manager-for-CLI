@@ -1,6 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const vm = require('node:vm');
 const {
   escapeHtml,
   embedJsonSafely,
@@ -610,6 +611,145 @@ test('buildHtml embeds every session field needed by the front end', () => {
   for (const field of ['tool', 'id', 'title', 'cwd', 'branch', 'groupKey', 'displayName', 'startedAt', 'lastActiveAt']) {
     assert.ok(html.includes(`"${field}"`), `missing field ${field}`);
   }
+});
+
+// Minimal DOM stub to actually execute buildHtml's embedded front-end <script>
+// via node:vm, instead of only asserting on substrings of the generated source.
+// This exact render/clustering code has caused two real regressions before
+// (misc-grouping wiring, duplicate cards) that shallow string checks missed,
+// so behavioral execution is worth the small amount of extra harness code.
+function makeFakeElement(tag) {
+  return {
+    tagName: String(tag).toUpperCase(),
+    className: '',
+    textContent: '',
+    value: '',
+    open: false,
+    children: [],
+    appendChild(child) { this.children.push(child); return child; },
+    addEventListener() {},
+  };
+}
+
+function runDashboardScript(html, controlValues = {}) {
+  const defaults = {
+    search: '', 'category-filter': 'all', 'tool-filter': 'all', 'range-filter': '30',
+    'generated-meta': '', 'skipped-warning': '', app: '',
+  };
+  const elementsById = {};
+  for (const [id, defaultValue] of Object.entries(defaults)) {
+    const el = makeFakeElement(id === 'app' ? 'div' : 'input');
+    el.value = controlValues[id] !== undefined ? controlValues[id] : defaultValue;
+    elementsById[id] = el;
+  }
+  const sandbox = {
+    document: {
+      createElement: makeFakeElement,
+      getElementById(id) {
+        if (!elementsById[id]) elementsById[id] = makeFakeElement('div');
+        return elementsById[id];
+      },
+    },
+    navigator: { clipboard: { writeText() {} } },
+  };
+  vm.createContext(sandbox);
+  const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
+  if (!scriptMatch) throw new Error('embedded <script> not found in buildHtml output');
+  vm.runInContext(scriptMatch[1], sandbox);
+  return { app: elementsById.app };
+}
+
+test('buildHtml renders each project cluster inside a collapsible <details>/<summary>', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'a', title: 't', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(detailsEls.length, 1);
+  assert.equal(detailsEls[0].children[0].tagName, 'SUMMARY');
+  assert.equal(detailsEls[0].children[0].textContent, 'proj');
+});
+
+test('buildHtml auto-expands only the 5 most-recently-active clusters by default, collapsing the rest', () => {
+  const base = new Date('2026-08-02T12:00:00.000Z').getTime();
+  const sessions = [];
+  for (let i = 0; i < 7; i++) {
+    const t = new Date(base - i * 3600000).toISOString();
+    sessions.push({
+      tool: 'claude-code', id: 'id' + i, title: 't' + i, cwd: 'C:\\work\\p' + i, branch: null,
+      groupKey: 'c:/work/p' + i, displayName: 'p' + i, startedAt: t, lastActiveAt: t,
+    });
+  }
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T12:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(detailsEls.length, 7);
+  const openLabels = detailsEls.filter((d) => d.open).map((d) => d.children[0].textContent);
+  const closedLabels = detailsEls.filter((d) => !d.open).map((d) => d.children[0].textContent);
+  assert.deepEqual(openLabels, ['p0', 'p1', 'p2', 'p3', 'p4']);
+  assert.deepEqual(closedLabels, ['p5', 'p6']);
+});
+
+test('buildHtml expands every matching cluster while a search is active, beyond the default top 5', () => {
+  const base = new Date('2026-08-02T12:00:00.000Z').getTime();
+  const sessions = [];
+  for (let i = 0; i < 7; i++) {
+    const t = new Date(base - i * 3600000).toISOString();
+    sessions.push({
+      tool: 'claude-code', id: 'id' + i, title: 't' + i, cwd: 'C:\\work\\p' + i, branch: null,
+      groupKey: 'c:/work/p' + i, displayName: 'p' + i, startedAt: t, lastActiveAt: t,
+    });
+  }
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T12:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { search: 'work', 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(detailsEls.length, 7);
+  assert.ok(detailsEls.every((d) => d.open === true), 'all matching clusters should expand while searching');
+});
+
+test('buildHtml wraps the misc cluster in the same collapsible <details> structure as project clusters', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'm1', title: 'misc title', cwd: 'C:\\Users\\sjack', branch: null,
+      groupKey: '__misc__', displayName: '雜項/隨手',
+      startedAt: '2026-08-02T00:00:00.000Z', lastActiveAt: '2026-08-02T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(detailsEls.length, 1);
+  assert.equal(detailsEls[0].children[0].tagName, 'SUMMARY');
+  assert.equal(detailsEls[0].children[0].textContent, '雜項/隨手');
+  assert.equal(detailsEls[0].open, true, 'the only cluster present is within the default top-5, so it stays open');
+});
+
+test('buildHtml still clusters same-name multi-path groups inside one <details>, listing each real path', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'a', title: 't', cwd: 'D:\\proj', branch: null,
+      groupKey: 'd:/proj', displayName: 'proj',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+    {
+      tool: 'claude-code', id: 'b', title: 't', cwd: 'E:\\proj', branch: null,
+      groupKey: 'e:/proj', displayName: 'proj',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(detailsEls.length, 1);
+  assert.ok(detailsEls[0].children[0].textContent.includes('proj（2 個位置）'));
+  const bodyDiv = detailsEls[0].children.find((el) => el.tagName === 'DIV');
+  const pathTexts = bodyDiv.children.filter((el) => el.className === 'group-path').map((el) => el.textContent);
+  assert.deepEqual(pathTexts, ['D:\\proj', 'E:\\proj']);
 });
 
 const { writeAtomic } = require('./session-dashboard.js');

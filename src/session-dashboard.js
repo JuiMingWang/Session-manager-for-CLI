@@ -414,6 +414,7 @@ function buildHtml(sessions, meta = {}) {
   body { font-family: system-ui, sans-serif; margin: 2rem; color: #222; }
   .card { border: 1px solid #ccc; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
   .group-title { font-weight: bold; margin-top: 1.5rem; }
+  summary.group-title { cursor: pointer; }
   .group-path { color: #888; font-size: 0.8rem; margin: 0.2rem 0 0.5rem; font-family: monospace; }
   .meta { color: #666; font-size: 0.85rem; }
   button.copy-btn { cursor: pointer; margin-top: 0.4rem; }
@@ -476,7 +477,7 @@ function buildHtml(sessions, meta = {}) {
 
       filtered.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
 
-      function renderCard(s) {
+      function renderCard(s, container) {
         var card = document.createElement('div');
         card.className = 'card';
 
@@ -501,7 +502,7 @@ function buildHtml(sessions, meta = {}) {
         });
         card.appendChild(btn);
 
-        app.appendChild(card);
+        container.appendChild(card);
       }
 
       function mostRecentTime(items) {
@@ -537,33 +538,46 @@ function buildHtml(sessions, meta = {}) {
         return bRecent - aRecent;
       });
 
-      clusterEntries.forEach(function (entry) {
+      // Collapsed by default beyond the most-recently-active handful, so a large
+      // history doesn't require scrolling past everything to find what's current.
+      // Overridden (forced open) while a search is active, since a narrowed-down
+      // result the user typed for should never hide behind an extra click.
+      var DEFAULT_EXPANDED_CLUSTER_COUNT = 5;
+
+      clusterEntries.forEach(function (entry, clusterIndex) {
         var label = entry[0];
         var subGroups = entry[1];
         subGroups.sort(function (a, b) { return mostRecentTime(b) - mostRecentTime(a); });
 
+        var details = document.createElement('details');
+        details.open = searchTerm.length > 0 || clusterIndex < DEFAULT_EXPANDED_CLUSTER_COUNT;
+
+        var summary = document.createElement('summary');
+        summary.className = 'group-title';
+        details.appendChild(summary);
+
+        var body = document.createElement('div');
+        details.appendChild(body);
+
         if (label === MISC_CLUSTER_KEY) {
-          var miscTitle = document.createElement('div');
-          miscTitle.className = 'group-title';
-          miscTitle.textContent = '雜項/隨手';
-          app.appendChild(miscTitle);
-          subGroups.forEach(function (items) { items.forEach(renderCard); });
+          summary.textContent = '雜項/隨手';
+          subGroups.forEach(function (items) { items.forEach(function (s) { renderCard(s, body); }); });
+          app.appendChild(details);
           return;
         }
 
         var isClustered = subGroups.length > 1;
-        var header = document.createElement('div');
-        header.className = 'group-title';
-        header.textContent = isClustered ? label + '（' + subGroups.length + ' 個位置）' : label;
-        app.appendChild(header);
+        summary.textContent = isClustered ? label + '（' + subGroups.length + ' 個位置）' : label;
 
         subGroups.forEach(function (items) {
           var pathEl = document.createElement('div');
           pathEl.className = 'group-path';
           pathEl.textContent = items[0].cwd;
-          app.appendChild(pathEl);
-          items.forEach(renderCard);
+          body.appendChild(pathEl);
+          items.forEach(function (s) { renderCard(s, body); });
         });
+
+        app.appendChild(details);
       });
     }
 
