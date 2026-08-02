@@ -735,7 +735,21 @@ function runDashboardScript(html, controlValues = {}) {
   return { app: elementsById.app };
 }
 
-test('buildHtml renders each project cluster inside a collapsible <details>/<summary>', () => {
+// Ticket 06 nests cards inside project node -> (optional path sub-node) -> time-bucket
+// node -> card, instead of the old flat project-node -> card shape. Tests that only care
+// about "which cards exist and what's on them" (not the exact tree depth) should not have
+// to hardcode how many levels deep a card sits, so this walks the whole subtree.
+function findAllCards(el) {
+  var found = [];
+  (el.children || []).forEach(function (child) {
+    var classes = (child.className || '').split(' ');
+    if (classes.indexOf('card') !== -1) found.push(child);
+    found = found.concat(findAllCards(child));
+  });
+  return found;
+}
+
+test('buildHtml renders each project node inside a collapsible <details>/<summary>', () => {
   const sessions = [
     {
       tool: 'claude-code', id: 'a', title: 't', cwd: 'C:\\work\\proj', branch: null,
@@ -751,7 +765,7 @@ test('buildHtml renders each project cluster inside a collapsible <details>/<sum
   assert.equal(detailsEls[0].children[0].textContent, 'proj');
 });
 
-test('buildHtml auto-expands only the 5 most-recently-active clusters by default, collapsing the rest', () => {
+test('buildHtml — 專案樹所有節點（專案節點、路徑子節點、時間區間）預設一律收合，不再有「展開最近 5 組」的例外', () => {
   const base = new Date('2026-08-02T12:00:00.000Z').getTime();
   const sessions = [];
   for (let i = 0; i < 7; i++) {
@@ -763,15 +777,12 @@ test('buildHtml auto-expands only the 5 most-recently-active clusters by default
   }
   const html = buildHtml(sessions, { generatedAt: '2026-08-02T12:00:00.000Z', skippedCount: 0 });
   const { app } = runDashboardScript(html, { 'range-filter': 'all' });
-  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
-  assert.equal(detailsEls.length, 7);
-  const openLabels = detailsEls.filter((d) => d.open).map((d) => d.children[0].textContent);
-  const closedLabels = detailsEls.filter((d) => !d.open).map((d) => d.children[0].textContent);
-  assert.deepEqual(openLabels, ['p0', 'p1', 'p2', 'p3', 'p4']);
-  assert.deepEqual(closedLabels, ['p5', 'p6']);
+  const projectNodes = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(projectNodes.length, 7);
+  assert.ok(projectNodes.every((d) => d.open === false), '所有專案節點都必須預設收合，包含最近活動的節點');
 });
 
-test('buildHtml expands every matching cluster while a search is active, beyond the default top 5', () => {
+test('buildHtml — 搜尋時專案樹節點仍維持收合，不再有搜尋強制展開的例外', () => {
   const base = new Date('2026-08-02T12:00:00.000Z').getTime();
   const sessions = [];
   for (let i = 0; i < 7; i++) {
@@ -783,12 +794,12 @@ test('buildHtml expands every matching cluster while a search is active, beyond 
   }
   const html = buildHtml(sessions, { generatedAt: '2026-08-02T12:00:00.000Z', skippedCount: 0 });
   const { app } = runDashboardScript(html, { search: 'work', 'range-filter': 'all' });
-  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
-  assert.equal(detailsEls.length, 7);
-  assert.ok(detailsEls.every((d) => d.open === true), 'all matching clusters should expand while searching');
+  const projectNodes = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(projectNodes.length, 7);
+  assert.ok(projectNodes.every((d) => d.open === false), '搜尋中的節點也必須維持收合');
 });
 
-test('buildHtml wraps the misc cluster in the same collapsible <details> structure as project clusters', () => {
+test('buildHtml wraps the misc project node in the same collapsible <details> structure as project nodes, defaulting closed', () => {
   const sessions = [
     {
       tool: 'claude-code', id: 'm1', title: 'misc title', cwd: 'C:\\Users\\sjack', branch: null,
@@ -802,10 +813,33 @@ test('buildHtml wraps the misc cluster in the same collapsible <details> structu
   assert.equal(detailsEls.length, 1);
   assert.equal(detailsEls[0].children[0].tagName, 'SUMMARY');
   assert.equal(detailsEls[0].children[0].textContent, '雜項/隨手');
-  assert.equal(detailsEls[0].open, true, 'the only cluster present is within the default top-5, so it stays open');
+  assert.equal(detailsEls[0].open, false, '雜項節點也必須預設收合，沒有例外');
 });
 
-test('buildHtml still clusters same-name multi-path groups inside one <details>, listing each real path', () => {
+test('buildHtml — 雜項節點下沒有路徑子節點這一層，直接是時間區間', () => {
+  // buildHtml's embedded script buckets against the real wall-clock Date.now() at render
+  // time, not meta.generatedAt — so "today" here must be computed from the actual current
+  // time, not a hardcoded historical date (which would drift out of "today" as soon as the
+  // real calendar date moves on).
+  const nowIso = new Date().toISOString();
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'm1', title: 'misc title', cwd: 'C:\\Users\\sjack', branch: null,
+      groupKey: '__misc__', displayName: '雜項/隨手',
+      startedAt: nowIso, lastActiveAt: nowIso,
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: nowIso, skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const miscNode = app.children.find((el) => el.tagName === 'DETAILS');
+  const bodyDiv = miscNode.children.find((el) => el.tagName === 'DIV');
+  const childNodes = bodyDiv.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(childNodes.length, 1, '雜項節點下應該只有時間區間節點，沒有路徑子節點層');
+  assert.ok(childNodes[0].className.includes('tree-node--time'));
+  assert.equal(childNodes[0].children[0].textContent, '今天');
+});
+
+test('buildHtml still clusters same-name multi-path groups inside one project node, with a collapsible path sub-node per real path', () => {
   const sessions = [
     {
       tool: 'claude-code', id: 'a', title: 't', cwd: 'D:\\proj', branch: null,
@@ -823,9 +857,104 @@ test('buildHtml still clusters same-name multi-path groups inside one <details>,
   const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
   assert.equal(detailsEls.length, 1);
   assert.ok(detailsEls[0].children[0].textContent.includes('proj（2 個位置）'));
-  const bodyDiv = detailsEls[0].children.find((el) => el.tagName === 'DIV');
-  const pathTexts = bodyDiv.children.filter((el) => el.className === 'group-path').map((el) => el.textContent);
+  const projectBody = detailsEls[0].children.find((el) => el.tagName === 'DIV');
+  const pathNodes = projectBody.children.filter((el) => el.className.includes('tree-node--path'));
+  assert.equal(pathNodes.length, 2, '同一專案節點下應該有兩個路徑子節點');
+  const pathTexts = pathNodes.map((el) => el.children[0].textContent);
   assert.deepEqual(pathTexts, ['D:\\proj', 'E:\\proj']);
+  assert.ok(pathNodes.every((d) => d.open === false), '路徑子節點也必須預設收合');
+});
+
+test('buildHtml — 單一路徑的專案節點不會出現路徑子節點這一層，直接是時間區間', () => {
+  // See note above: bucketing is computed against real Date.now(), so use "now" here too.
+  const nowIso = new Date().toISOString();
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'a', title: 't', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: nowIso, lastActiveAt: nowIso,
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: nowIso, skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const projectNode = app.children.find((el) => el.tagName === 'DETAILS');
+  const body = projectNode.children.find((el) => el.tagName === 'DIV');
+  const pathNodes = body.children.filter((el) => el.className.includes('tree-node--path'));
+  const timeNodes = body.children.filter((el) => el.className.includes('tree-node--time'));
+  assert.equal(pathNodes.length, 0, '單一路徑不應該出現路徑子節點層');
+  assert.equal(timeNodes.length, 1);
+  assert.equal(timeNodes[0].children[0].textContent, '今天');
+});
+
+test('buildHtml — 依 lastActiveAt 分成今天／昨天／本週／更早，且只渲染有內容的時間區間', () => {
+  // Mirror buildHtml's own bucket-boundary math (calendar-day start of the real "now"),
+  // then place one session solidly inside each bucket, so this test stays correct
+  // regardless of what the real calendar date is when it runs.
+  const now = Date.now();
+  function dayStart(ms) {
+    const d = new Date(ms);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+  const todayStart = dayStart(now);
+  const yesterdayStart = todayStart - 24 * 60 * 60 * 1000;
+  const weekStart = todayStart - 7 * 24 * 60 * 60 * 1000;
+  const HOUR = 60 * 60 * 1000;
+
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'today', title: '今天的', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: new Date(todayStart + HOUR).toISOString(), lastActiveAt: new Date(todayStart + HOUR).toISOString(),
+    },
+    {
+      tool: 'claude-code', id: 'yesterday', title: '昨天的', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: new Date(yesterdayStart + HOUR).toISOString(), lastActiveAt: new Date(yesterdayStart + HOUR).toISOString(),
+    },
+    {
+      tool: 'claude-code', id: 'thisweek', title: '這週的', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: new Date(weekStart + HOUR).toISOString(), lastActiveAt: new Date(weekStart + HOUR).toISOString(),
+    },
+    {
+      tool: 'claude-code', id: 'older', title: '更早的', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: new Date(weekStart - 24 * 60 * 60 * 1000).toISOString(), lastActiveAt: new Date(weekStart - 24 * 60 * 60 * 1000).toISOString(),
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: new Date(now).toISOString(), skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const projectNode = app.children.find((el) => el.tagName === 'DETAILS');
+  const body = projectNode.children.find((el) => el.tagName === 'DIV');
+  const timeNodes = body.children.filter((el) => el.className.includes('tree-node--time'));
+  const labels = timeNodes.map((el) => el.children[0].textContent);
+  assert.deepEqual(labels, ['今天', '昨天', '本週', '更早'], '四個時間區間都各有一筆，應該全部渲染，且依此順序排列');
+  timeNodes.forEach((node) => {
+    const bucketBody = node.children.find((el) => el.tagName === 'DIV');
+    const cards = bucketBody.children.filter((el) => el.className.indexOf('card') !== -1);
+    assert.equal(cards.length, 1, node.children[0].textContent + ' 應該只有一筆 session');
+  });
+});
+
+test('buildHtml — 單一時間區間展開後不分頁，全部顯示（無論筆數多少）', () => {
+  const t = '2026-08-02T09:00:00.000Z';
+  const sessions = [];
+  for (let i = 0; i < 30; i++) {
+    sessions.push({
+      tool: 'claude-code', id: 'id' + i, title: 't' + i, cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj', startedAt: t, lastActiveAt: t,
+    });
+  }
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T12:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const projectNode = app.children.find((el) => el.tagName === 'DETAILS');
+  const body = projectNode.children.find((el) => el.tagName === 'DIV');
+  const timeNode = body.children.find((el) => el.className.includes('tree-node--time'));
+  const bucketBody = timeNode.children.find((el) => el.tagName === 'DIV');
+  const cards = bucketBody.children.filter((el) => el.className.indexOf('card') !== -1);
+  assert.equal(cards.length, 30, '不應該有分頁或「顯示更多」上限，全部 30 筆都要出現');
+  assert.ok(!bucketBody.children.some((el) => el.tagName === 'BUTTON' && /更多/.test(el.textContent)), '不應該有「顯示更多」按鈕');
 });
 
 test('buildHtml marks a titleIsFallback card with a distinct style, leaving a real title unmarked', () => {
@@ -843,9 +972,7 @@ test('buildHtml marks a titleIsFallback card with a distinct style, leaving a re
   ];
   const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
   const { app } = runDashboardScript(html, { 'range-filter': 'all' });
-  const detailsEl = app.children.find((el) => el.tagName === 'DETAILS');
-  const bodyDiv = detailsEl.children.find((el) => el.tagName === 'DIV');
-  const cards = bodyDiv.children.filter((el) => el.className === 'card');
+  const cards = findAllCards(app).filter((c) => c.className === 'card');
   assert.equal(cards.length, 2);
   const realCard = cards.find((c) => c.children[0].textContent.indexOf('真實標題') !== -1);
   const fallbackCard = cards.find((c) => c.children[0].textContent.indexOf('proj (2026-08-01') !== -1);
@@ -868,9 +995,7 @@ test('buildHtml marks a pathExists:false card with a warning label and greyscale
   ];
   const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
   const { app } = runDashboardScript(html, { 'range-filter': 'all' });
-  const detailsEl = app.children.find((el) => el.tagName === 'DETAILS');
-  const bodyDiv = detailsEl.children.find((el) => el.tagName === 'DIV');
-  const cards = bodyDiv.children.filter((el) => el.className.indexOf('card') !== -1);
+  const cards = findAllCards(app);
   assert.equal(cards.length, 2);
   const existsCard = cards.find((c) => c.children[0].textContent.indexOf('路徑還在') !== -1);
   const goneCard = cards.find((c) => c.children[0].textContent.indexOf('路徑已刪除') !== -1);
@@ -902,9 +1027,7 @@ test('buildHtml renders a distinct tool-badge class for claude-code vs codex ses
   ];
   const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
   const { app } = runDashboardScript(html, { 'range-filter': 'all' });
-  const detailsEl = app.children.find((el) => el.tagName === 'DETAILS');
-  const bodyDiv = detailsEl.children.find((el) => el.tagName === 'DIV');
-  const cards = bodyDiv.children.filter((el) => el.className.indexOf('card') !== -1);
+  const cards = findAllCards(app);
   assert.equal(cards.length, 2);
   const ccCard = cards.find((c) => c.children[0].textContent.indexOf('cc title') !== -1);
   const cxCard = cards.find((c) => c.children[0].textContent.indexOf('cx title') !== -1);
@@ -929,9 +1052,7 @@ function buildSingleSessionHtmlForCopyTests() {
 }
 
 function findCopyButton(app) {
-  const detailsEl = app.children.find((el) => el.tagName === 'DETAILS');
-  const bodyDiv = detailsEl.children.find((el) => el.tagName === 'DIV');
-  const card = bodyDiv.children.find((el) => el.className.indexOf('card') !== -1);
+  const card = findAllCards(app)[0];
   return card.children.find((el) => el.tagName === 'BUTTON');
 }
 

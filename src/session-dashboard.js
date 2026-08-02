@@ -421,9 +421,15 @@ function buildHtml(sessions, meta = {}) {
 <style>
   body { font-family: system-ui, sans-serif; margin: 2rem; color: #222; }
   .card { border: 1px solid #ccc; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
-  .group-title { font-weight: bold; margin-top: 1.5rem; }
-  summary.group-title { cursor: pointer; }
-  .group-path { color: #888; font-size: 0.8rem; margin: 0.2rem 0 0.5rem; font-family: monospace; }
+  .tree-node { margin-top: 0.4rem; }
+  .tree-node > .tree-body { margin-left: 0.5rem; padding-left: 1rem; border-left: 1px dashed #ccc; margin-top: 0.3rem; }
+  summary.tree-summary { cursor: pointer; list-style: none; }
+  summary.tree-summary::-webkit-details-marker { display: none; }
+  summary.tree-summary::before { content: '▸'; display: inline-block; width: 1em; margin-right: 0.3em; transition: transform 0.12s ease; }
+  .tree-node[open] > summary.tree-summary::before { transform: rotate(90deg); }
+  .tree-node--project > summary.tree-summary { font-weight: bold; }
+  .tree-node--path > summary.tree-summary { color: #888; font-size: 0.85rem; font-family: monospace; }
+  .tree-node--time > summary.tree-summary { color: #666; font-size: 0.85rem; }
   .meta { color: #666; font-size: 0.85rem; }
   .title-fallback { color: #888; font-style: italic; }
   .card-path-missing { filter: grayscale(1); opacity: 0.7; }
@@ -436,7 +442,9 @@ function buildHtml(sessions, meta = {}) {
   @media (prefers-color-scheme: dark) {
     body { background: #1a1a1a; color: #ddd; }
     .card { border-color: #444; }
-    .group-path { color: #999; }
+    .tree-node > .tree-body { border-left-color: #444; }
+    .tree-node--path > summary.tree-summary { color: #999; }
+    .tree-node--time > summary.tree-summary { color: #aaa; }
     .meta { color: #aaa; }
     .title-fallback { color: #999; }
     .path-missing-warning { color: #f87171; }
@@ -584,46 +592,88 @@ function buildHtml(sessions, meta = {}) {
         return bRecent - aRecent;
       });
 
-      // Collapsed by default beyond the most-recently-active handful, so a large
-      // history doesn't require scrolling past everything to find what's current.
-      // Overridden (forced open) while a search is active, since a narrowed-down
-      // result the user typed for should never hide behind an extra click.
-      var DEFAULT_EXPANDED_CLUSTER_COUNT = 5;
+      // 時間區間邊界：以「今天」的日曆日起點為基準，往前推算「昨天」與「本週」，
+      // 不採 ISO 週（週一為始）——這是單人工具，使用者關心的是「大概多久以前」，
+      // 用滾動 7 天視窗（扣掉今天／昨天）比對齊團隊行事曆週界更直覺、不需要額外解釋。
+      function dayStart(ms) {
+        var d = new Date(ms);
+        d.setHours(0, 0, 0, 0);
+        return d.getTime();
+      }
+      var todayStart = dayStart(now);
+      var yesterdayStart = todayStart - 24 * 60 * 60 * 1000;
+      var weekStart = todayStart - 7 * 24 * 60 * 60 * 1000;
+      var TIME_BUCKET_LABELS = ['今天', '昨天', '本週', '更早'];
+      function bucketLabelFor(lastActiveAt) {
+        var t = new Date(lastActiveAt).getTime();
+        if (t >= todayStart) return '今天';
+        if (t >= yesterdayStart) return '昨天';
+        if (t >= weekStart) return '本週';
+        return '更早';
+      }
 
-      clusterEntries.forEach(function (entry, clusterIndex) {
+      function createTreeNode(levelClass) {
+        var details = document.createElement('details');
+        details.className = 'tree-node ' + levelClass;
+        // Ticket 06: removed the old "expand top N clusters / force-open while searching"
+        // behavior entirely — every tree node, at every level, always starts collapsed.
+        details.open = false;
+        var summary = document.createElement('summary');
+        summary.className = 'tree-summary';
+        details.appendChild(summary);
+        var body = document.createElement('div');
+        body.className = 'tree-body';
+        details.appendChild(body);
+        return { details: details, summary: summary, body: body };
+      }
+
+      function renderTimeBuckets(sessions, container) {
+        var byBucket = new Map();
+        sessions.forEach(function (s) {
+          var label = bucketLabelFor(s.lastActiveAt);
+          if (!byBucket.has(label)) byBucket.set(label, []);
+          byBucket.get(label).push(s);
+        });
+        TIME_BUCKET_LABELS.forEach(function (label) {
+          var items = byBucket.get(label);
+          if (!items || items.length === 0) return;
+          var node = createTreeNode('tree-node--time');
+          node.summary.textContent = label;
+          items.forEach(function (s) { renderCard(s, node.body); });
+          container.appendChild(node.details);
+        });
+      }
+
+      clusterEntries.forEach(function (entry) {
         var label = entry[0];
         var subGroups = entry[1];
         subGroups.sort(function (a, b) { return mostRecentTime(b) - mostRecentTime(a); });
 
-        var details = document.createElement('details');
-        details.open = searchTerm.length > 0 || clusterIndex < DEFAULT_EXPANDED_CLUSTER_COUNT;
+        var isMisc = label === MISC_CLUSTER_KEY;
+        // 雜項沒有路徑子節點這一層（規格明文規定），即使實務上雜項的 groupKey
+        // 永遠只會有一組，這裡仍明確用 isMisc 排除，直接依照規格表達意圖，
+        // 不依賴「雜項剛好只有一組」這個分群邏輯的隱含副作用。
+        var isClustered = !isMisc && subGroups.length > 1;
 
-        var summary = document.createElement('summary');
-        summary.className = 'group-title';
-        details.appendChild(summary);
+        var projectNode = createTreeNode('tree-node--project');
+        projectNode.summary.textContent = isMisc
+          ? '雜項/隨手'
+          : (isClustered ? label + '（' + subGroups.length + ' 個位置）' : label);
 
-        var body = document.createElement('div');
-        details.appendChild(body);
-
-        if (label === MISC_CLUSTER_KEY) {
-          summary.textContent = '雜項/隨手';
-          subGroups.forEach(function (items) { items.forEach(function (s) { renderCard(s, body); }); });
-          app.appendChild(details);
-          return;
+        if (isClustered) {
+          subGroups.forEach(function (items) {
+            var pathNode = createTreeNode('tree-node--path');
+            pathNode.summary.textContent = items[0].cwd;
+            renderTimeBuckets(items, pathNode.body);
+            projectNode.body.appendChild(pathNode.details);
+          });
+        } else {
+          var allItems = [];
+          subGroups.forEach(function (items) { allItems = allItems.concat(items); });
+          renderTimeBuckets(allItems, projectNode.body);
         }
 
-        var isClustered = subGroups.length > 1;
-        summary.textContent = isClustered ? label + '（' + subGroups.length + ' 個位置）' : label;
-
-        subGroups.forEach(function (items) {
-          var pathEl = document.createElement('div');
-          pathEl.className = 'group-path';
-          pathEl.textContent = items[0].cwd;
-          body.appendChild(pathEl);
-          items.forEach(function (s) { renderCard(s, body); });
-        });
-
-        app.appendChild(details);
+        app.appendChild(projectNode.details);
       });
     }
 
