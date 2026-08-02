@@ -221,6 +221,56 @@ test('readFirstJsonLines does not corrupt a multi-byte UTF-8 character straddlin
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
+const { readLastJsonLines } = require('./session-dashboard.js');
+
+test('readLastJsonLines returns the last n parseable records in original (oldest-to-newest) file order, skipping blank lines', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'many.jsonl');
+  const lines = Array.from({ length: 5 }, (_, i) => JSON.stringify({ n: i }));
+  fsForTests.writeFileSync(filePath, `\n${lines.join('\n\n')}\n`, 'utf8');
+  const records = readLastJsonLines(filePath, 3);
+  assert.deepEqual(records.map((r) => r.n), [2, 3, 4]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readLastJsonLines skips a truncated last line but keeps the earlier parseable ones', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'truncated.jsonl');
+  const goodLine1 = JSON.stringify({ type: 'user', message: { content: 'first' } });
+  const goodLine2 = JSON.stringify({ type: 'user', message: { content: 'second' } });
+  const truncatedLine = '{"type":"user","message":{"content":"cut off mid-wr';
+  fsForTests.writeFileSync(filePath, `${goodLine1}\n${goodLine2}\n${truncatedLine}`, 'utf8');
+  const records = readLastJsonLines(filePath, 20);
+  assert.equal(records.length, 2);
+  assert.equal(records[0].message.content, 'first');
+  assert.equal(records[1].message.content, 'second');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readLastJsonLines does not corrupt a multi-byte UTF-8 character straddling a 64KB chunk boundary, reading from the tail', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'boundary.jsonl');
+  const CHUNK_SIZE = 64 * 1024;
+  const leadingLine = JSON.stringify({ n: 0 });
+  const prefix = '{"type":"user","message":{"content":"';
+  const firstChar = '中';
+  const rest = '文測試"}}';
+  // Backward chunk boundaries are counted from EOF, so (unlike the forward-read test) what
+  // must be sized is the content AFTER the target character, not before it: pad so the number
+  // of bytes from the character's end to EOF is CHUNK_SIZE - 2, putting 2 of its 3 UTF-8 bytes
+  // in the first (tail) backward read and the 3rd byte in the second backward read.
+  const afterCharBytesTarget = CHUNK_SIZE - 2;
+  const fixedAfterBytes = Buffer.byteLength(rest) + 1; // rest + trailing '\n'
+  const filler = 'A'.repeat(Math.max(0, afterCharBytesTarget - fixedAfterBytes));
+  fsForTests.writeFileSync(filePath, `${leadingLine}\n${prefix}${firstChar}${filler}${rest}\n`, 'utf8');
+
+  const records = readLastJsonLines(filePath, 1);
+  assert.equal(records.length, 1);
+  assert.ok(records[0].message.content.endsWith('文測試'), records[0].message.content.slice(-20));
+  assert.ok(!records[0].message.content.includes('�'), 'must not contain the UTF-8 replacement character');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
 const { walkJsonlFiles, scanClaudeCodeFile, scanClaudeCode } = require('./session-dashboard.js');
 
 function writeJsonl(filePath, records) {
@@ -282,6 +332,39 @@ test('scanClaudeCodeFile falls back to basename+timestamp title when no genuine 
   const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
   assert.ok(session.title.startsWith('other-project ('), session.title);
   assert.equal(session.titleIsFallback, true, '退回資料夾名+時間戳應標記為退而標題');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCodeFile sets firstMessagePreview/lastMessagePreview from the first and last genuine (non-synthetic) user messages, capped to 5 lines', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'preview-123.jsonl');
+  const firstMultilineContent = 'L1第一行\nL2第二行\nL3第三行\nL4第四行\nL5第五行\nL6不應出現\nL7不應出現';
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\preview-project', isMeta: true, message: { content: '<local-command-caveat>系統注入內容，應被略過</local-command-caveat>' } },
+    { type: 'user', message: { content: firstMultilineContent } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: '這是助理回覆，不算使用者訊息' }] } },
+    { type: 'user', isMeta: true, message: { content: '<local-command-caveat>結尾附近的注入內容，應被略過</local-command-caveat>' } },
+    { type: 'user', message: { content: '這是最後一則真實使用者訊息' } },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.equal(session.firstMessagePreview, 'L1第一行\nL2第二行\nL3第三行\nL4第四行\nL5第五行', '應只保留前 5 行，且跳過開頭的注入內容');
+  assert.equal(session.lastMessagePreview, '這是最後一則真實使用者訊息');
+  assert.notEqual(session.firstMessagePreview, session.lastMessagePreview);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCodeFile sets firstMessagePreview/lastMessagePreview to null when every scanned record is synthetic (real AGENTS.md injection case)', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'all-synthetic-789.jsonl');
+  const realInjectedAgentsMd =
+    '# AGENTS.md instructions\n\n<INSTRUCTIONS>\n1.盡量輸出簡潔，說明重點。\n2.每完成我要求的代碼修改時，需建立一個Git，並且Git的名稱須以簡潔中文呈現。\n3.每次展開一個新的項目時，需主動問我是否要將任務拆分成多個簡單任務執行。\n4.寫代碼時，變數命名須明確，註釋要清晰。\n5.寫項目的時候，盡量以架構師的假度去考慮，不要產生超大文件。數據結構要精簡、結構邏輯要合理。\n6.確實按照規畫的去執行。\n7.在開始進行代碼修改與編寫前，需簡潔地向我提出修改方法以及問我是否需要將任務拆分。\n</INSTRUCTIONS>\n<environment_context>\n  <cwd>C:\\Users\\sjack\\OneDrive\\Documents\\PDF名稱修改</cwd>\n</environment_context>';
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\all-synthetic', isMeta: true, message: { content: '<local-command-caveat>...</local-command-caveat>' } },
+    { type: 'user', message: { content: realInjectedAgentsMd } },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.equal(session.firstMessagePreview, null);
+  assert.equal(session.lastMessagePreview, null);
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -526,6 +609,40 @@ test('scanCodexFile falls back to basename+timestamp title when neither index no
   const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
   assert.ok(session.title.startsWith('other-thing ('), session.title);
   assert.equal(session.titleIsFallback, true, '退回資料夾名+時間戳應標記為退而標題');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile sets firstMessagePreview/lastMessagePreview from the first and last genuine (non-synthetic) user messages, capped to 5 lines', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-preview.jsonl');
+  const firstMultilineContent = 'L1第一行\nL2第二行\nL3第三行\nL4第四行\nL5第五行\nL6不應出現\nL7不應出現';
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-preview', cwd: 'C:\\work\\preview', git: {} } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>系統注入內容，應被略過</environment_context>' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: firstMultilineContent }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '這是助理回覆，不算使用者訊息' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>結尾附近的注入內容，應被略過</environment_context>' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '這是最後一則真實使用者訊息' }] } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.equal(session.firstMessagePreview, 'L1第一行\nL2第二行\nL3第三行\nL4第四行\nL5第五行', '應只保留前 5 行，且跳過開頭的注入內容');
+  assert.equal(session.lastMessagePreview, '這是最後一則真實使用者訊息');
+  assert.notEqual(session.firstMessagePreview, session.lastMessagePreview);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile sets firstMessagePreview/lastMessagePreview to null when every scanned record is synthetic (real AGENTS.md injection case)', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-all-synthetic.jsonl');
+  const realInjectedAgentsMd =
+    '# AGENTS.md instructions\n\n<INSTRUCTIONS>\n1.盡量輸出簡潔，說明重點。\n2.每完成我要求的代碼修改時，需建立一個Git，並且Git的名稱須以簡潔中文呈現。\n3.每次展開一個新的項目時，需主動問我是否要將任務拆分成多個簡單任務執行。\n4.寫代碼時，變數命名須明確，註釋要清晰。\n5.寫項目的時候，盡量以架構師的假度去考慮，不要產生超大文件。數據結構要精簡、結構邏輯要合理。\n6.確實按照規畫的去執行。\n7.在開始進行代碼修改與編寫前，需簡潔地向我提出修改方法以及問我是否需要將任務拆分。\n</INSTRUCTIONS>\n<environment_context>\n  <cwd>C:\\Users\\sjack\\OneDrive\\Documents\\PDF名稱修改</cwd>\n</environment_context>';
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-all-synthetic', cwd: 'C:\\work\\all-synthetic', git: {} } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: realInjectedAgentsMd }] } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.equal(session.firstMessagePreview, null);
+  assert.equal(session.lastMessagePreview, null);
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1219,6 +1336,112 @@ test('buildHtml — 接續快速區接續按鈕的複製行為與專案樹卡片
   assert.equal(btn.textContent, '複製續接指令');
   btn.click();
   assert.equal(btn.textContent, '已複製✓');
+});
+
+// Ticket 08 — 訊息預覽功能：卡片上可點擊展開/收起的預覽切換，套用在專案樹與接續快速區兩邊。
+function findByClassName(el, cls) {
+  if ((el.className || '').split(' ').indexOf(cls) !== -1) return el;
+  for (const child of el.children || []) {
+    const found = findByClassName(child, cls);
+    if (found) return found;
+  }
+  return null;
+}
+
+test('buildHtml — 點擊卡片的預覽切換後正確顯示 firstMessagePreview/lastMessagePreview（標示「開始」／「最後」），再次點擊收合', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'preview-a', title: 't', cwd: 'C:\\work\\preview-a', branch: null,
+      groupKey: 'c:/work/preview-a', displayName: 'preview-a',
+      firstMessagePreview: '開始訊息第一行\n開始訊息第二行',
+      lastMessagePreview: '最後訊息內容',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const card = findAllCards(app)[0];
+  const toggle = findByClassName(card, 'preview-toggle');
+  const body = findByClassName(card, 'preview-body');
+  assert.ok(toggle, '卡片應包含可點擊的預覽切換元素');
+  assert.ok(body, '卡片應包含預覽內容區塊');
+  assert.equal(body.className.indexOf('preview-open'), -1, '預設應為收合狀態');
+
+  const bodyTextBefore = body.children.map((el) => el.textContent).join('\n');
+  assert.ok(bodyTextBefore.indexOf('開始') !== -1 && bodyTextBefore.indexOf('開始訊息第一行') !== -1, '應包含標示「開始」與 firstMessagePreview 內容');
+  assert.ok(bodyTextBefore.indexOf('最後') !== -1 && bodyTextBefore.indexOf('最後訊息內容') !== -1, '應包含標示「最後」與 lastMessagePreview 內容');
+
+  toggle.click();
+  assert.ok(body.className.indexOf('preview-open') !== -1, '點擊後應展開（套用可見樣式 class）');
+
+  toggle.click();
+  assert.equal(body.className.indexOf('preview-open'), -1, '再次點擊應收合');
+});
+
+test('buildHtml — firstMessagePreview/lastMessagePreview 為 null 時顯示「無」占位文字，而非空白或拋出例外', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'null-preview', title: 't', cwd: 'C:\\work\\np', branch: null,
+      groupKey: 'c:/work/np', displayName: 'np', firstMessagePreview: null, lastMessagePreview: null,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const card = findAllCards(app)[0];
+  const body = findByClassName(card, 'preview-body');
+  const bodyText = body.children.map((el) => el.textContent).join('\n');
+  assert.ok(bodyText.indexOf('無') !== -1, '找不到真實訊息時應顯示「無」占位文字');
+});
+
+test('buildHtml — 展開一張卡片的預覽不影響其他卡片的展開狀態（各卡片獨立）', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'card-alpha', title: 'Alpha標題', cwd: 'C:\\work\\alpha', branch: null,
+      groupKey: 'c:/work/alpha', displayName: 'alpha', firstMessagePreview: 'Alpha開始', lastMessagePreview: 'Alpha最後',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+    {
+      tool: 'claude-code', id: 'card-beta', title: 'Beta標題', cwd: 'C:\\work\\beta', branch: null,
+      groupKey: 'c:/work/beta', displayName: 'beta', firstMessagePreview: 'Beta開始', lastMessagePreview: 'Beta最後',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const cards = findAllCards(app);
+  assert.equal(cards.length, 2);
+  const cardAlpha = cards.find((c) => c.children[0].textContent.indexOf('Alpha標題') !== -1);
+  const cardBeta = cards.find((c) => c.children[0].textContent.indexOf('Beta標題') !== -1);
+  const toggleAlpha = findByClassName(cardAlpha, 'preview-toggle');
+  const bodyAlpha = findByClassName(cardAlpha, 'preview-body');
+  const bodyBeta = findByClassName(cardBeta, 'preview-body');
+
+  toggleAlpha.click();
+  assert.ok(bodyAlpha.className.indexOf('preview-open') !== -1, 'Alpha 卡片應展開');
+  assert.equal(bodyBeta.className.indexOf('preview-open'), -1, 'Beta 卡片不應受 Alpha 卡片點擊影響，維持收合');
+});
+
+test('buildHtml — 接續快速區卡片也套用相同的預覽切換（點擊展開顯示開始／最後訊息）', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'qr-preview', title: 't', cwd: 'C:\\work\\qrp', branch: null,
+      groupKey: 'c:/work/qrp', displayName: 'qrp', pathExists: true,
+      firstMessagePreview: '快速區開始', lastMessagePreview: '快速區最後',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-02T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T00:00:00.000Z', skippedCount: 0 });
+  const { elementsById } = runDashboardScript(html, { 'range-filter': 'all' });
+  const cards = findQuickResumeCards(elementsById);
+  const card = cards[0];
+  const toggle = findByClassName(card, 'preview-toggle');
+  const body = findByClassName(card, 'preview-body');
+  assert.ok(toggle && body, '接續快速區卡片也應有預覽切換元素');
+  toggle.click();
+  assert.ok(body.className.indexOf('preview-open') !== -1, '點擊後應展開');
+  const bodyText = body.children.map((el) => el.textContent).join('\n');
+  assert.ok(bodyText.indexOf('快速區開始') !== -1 && bodyText.indexOf('快速區最後') !== -1);
 });
 
 const { writeAtomic } = require('./session-dashboard.js');

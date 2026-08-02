@@ -4,15 +4,17 @@
 
 **Blocked by:** 06（專案樹卡片需存在）、07（接續快速區卡片需存在）——預覽要同時掛在這兩處的卡片上
 
-- [ ] 新增一個從檔案尾端往回讀取的函式，鏡射既有「從檔頭往前讀」函式已解決的問題：用固定大小區塊從檔尾讀取、累積原始位元組、只在確定落在完整行邊界時才切割解碼成 UTF-8，避免多位元組字元被區塊邊界切斷
-- [ ] `scanClaudeCodeFile`／`scanCodexFile` 回傳的 session 物件新增 `firstMessagePreview: string | null` 與 `lastMessagePreview: string | null` 兩個欄位
+- [x] 新增一個從檔案尾端往回讀取的函式，鏡射既有「從檔頭往前讀」函式已解決的問題：用固定大小區塊從檔尾讀取、累積原始位元組、只在確定落在完整行邊界時才切割解碼成 UTF-8，避免多位元組字元被區塊邊界切斷
+- [x] `scanClaudeCodeFile`／`scanCodexFile` 回傳的 session 物件新增 `firstMessagePreview: string | null` 與 `lastMessagePreview: string | null` 兩個欄位
   - `firstMessagePreview`：沿用既有檔頭讀取範圍內第一則被判定為非注入內容（synthetic）的使用者訊息前幾行
   - `lastMessagePreview`：用新增的檔尾讀取函式，取得檔案尾端記錄後，找最後一則被判定為非注入內容的使用者訊息前幾行
   - 兩者都找不到真實訊息時為 `null`
-- [ ] 卡片新增一個可點擊展開/收起的預覽區塊：展開時分別標示「開始」與「最後」，顯示 `firstMessagePreview`／`lastMessagePreview`；再點一次收起
-- [ ] 套用在接續快速區與專案樹兩邊的卡片
-- [ ] 展開/收起只會讓卡片本身往下推擠版面，不做放大、hover 浮層或彈出視窗；且不影響其他卡片的大小或位置
-- [ ] 新增檔尾讀取函式的 UTF-8 跨區塊邊界正確切割測試（比照既有檔頭讀取函式的對應測試）
-- [ ] 新增測試驗證 `firstMessagePreview`／`lastMessagePreview` 能正確跳過注入內容找到真實訊息，以及全部都是注入內容時回傳 `null`
-- [ ] 透過既有的 DOM 執行測試手法驗證：點擊預覽切換後正確顯示/隱藏兩則訊息預覽，且不影響其他卡片
+- [x] 卡片新增一個可點擊展開/收起的預覽區塊：展開時分別標示「開始」與「最後」，顯示 `firstMessagePreview`／`lastMessagePreview`；再點一次收起
+- [x] 套用在接續快速區與專案樹兩邊的卡片
+- [x] 展開/收起只會讓卡片本身往下推擠版面，不做放大、hover 浮層或彈出視窗；且不影響其他卡片的大小或位置
+- [x] 新增檔尾讀取函式的 UTF-8 跨區塊邊界正確切割測試（比照既有檔頭讀取函式的對應測試）
+- [x] 新增測試驗證 `firstMessagePreview`／`lastMessagePreview` 能正確跳過注入內容找到真實訊息，以及全部都是注入內容時回傳 `null`
+- [x] 透過既有的 DOM 執行測試手法驗證：點擊預覽切換後正確顯示/隱藏兩則訊息預覽，且不影響其他卡片
 - [ ] 部署後在真實資料／瀏覽器上肉眼確認：找一筆內容較長的 session，展開預覽後「最後一則」確實是接近該 session 結尾的內容，而不是跟「第一則」幾乎一樣
+  - 資料層級部分已完成（見 `docs/deploy-log.md` 對應條目）：直接讀取部署後的 `sessions-dashboard.html` 內嵌 `DATA`，挑一筆跨度 674 小時的真實 Codex session，`firstMessagePreview`/`lastMessagePreview` 確實是主題完全不同的兩段內容，證實 `lastMessagePreview` 真的來自對話尾端而非開頭窗口。
+  - 瀏覽器上實際點擊展開、肉眼確認 UI 互動行為這部分尚未執行，維持未勾選。

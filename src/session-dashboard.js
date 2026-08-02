@@ -104,6 +104,44 @@ function readFirstJsonLines(filePath, n) {
   return records;
 }
 
+function readLastJsonLines(filePath, n) {
+  const CHUNK_SIZE = 64 * 1024;
+  const fd = fs.openSync(filePath, 'r');
+  const records = [];
+  try {
+    // Mirror image of readFirstJsonLines: read fixed-size chunks backward from EOF, each new
+    // chunk PREPENDED to the accumulated raw Buffer (so the buffer's tail always stays pinned
+    // to a confirmed boundary — the true EOF at first, then a confirmed '\n' after that).
+    // A line is only decoded once bounded by a '\n' on both sides (or the true start/end of
+    // file), so a multi-byte UTF-8 character split across two backward reads is never decoded
+    // until both halves have been read and joined — same corruption hazard as the forward
+    // reader, mirrored.
+    let buffer = Buffer.alloc(0);
+    let position = fs.fstatSync(fd).size;
+    const chunk = Buffer.alloc(CHUNK_SIZE);
+    do {
+      const readSize = Math.min(CHUNK_SIZE, position);
+      position -= readSize;
+      const bytesRead = fs.readSync(fd, chunk, 0, readSize, position);
+      if (bytesRead > 0) buffer = Buffer.concat([chunk.subarray(0, bytesRead), buffer]);
+
+      let newlineIndex;
+      while (records.length < n && (newlineIndex = buffer.lastIndexOf(0x0a)) !== -1) {
+        pushIfParseable(records, buffer.subarray(newlineIndex + 1).toString('utf8'));
+        buffer = buffer.subarray(0, newlineIndex);
+      }
+    } while (position > 0 && records.length < n);
+
+    if (records.length < n && buffer.length > 0) {
+      pushIfParseable(records, buffer.toString('utf8'));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  // Collected newest-first (peeled off the tail inward) — flip to the file's original order.
+  return records.reverse();
+}
+
 // ---------------------------------------------------------------------------
 // Structural fallback for detecting injected/synthetic text
 // ---------------------------------------------------------------------------
@@ -127,6 +165,43 @@ function looksLikeInjectedDocument(text) {
   if (/^[<#]/.test(text)) return true;
   const headingLineCount = (text.match(/^#{1,6}\s/gm) || []).length;
   return headingLineCount >= 2;
+}
+
+// ---------------------------------------------------------------------------
+// Shared "find first genuine (non-synthetic) message" scanning
+// ---------------------------------------------------------------------------
+//
+// extractClaudeTitle/extractCodexTitle (single-line, 120-char titles) and the first/last
+// message preview fields (multi-line) all need the identical "loop records, skip
+// non-candidates, skip synthetic text, return the first genuine one" logic — factored out
+// once here instead of duplicating it across four call sites (first/last x claude/codex).
+
+function findGenuineMessageText(records, matchers) {
+  for (const record of records) {
+    if (!matchers.isCandidate(record)) continue;
+    const text = matchers.extractText(record);
+    if (matchers.isSynthetic(text)) continue;
+    return text.trim();
+  }
+  return null;
+}
+
+const MESSAGE_PREVIEW_MAX_LINES = 5;
+
+function buildMessagePreview(text) {
+  return text.split('\n').slice(0, MESSAGE_PREVIEW_MAX_LINES).join('\n');
+}
+
+function extractFirstMessagePreview(records, matchers) {
+  const text = findGenuineMessageText(records, matchers);
+  return text === null ? null : buildMessagePreview(text);
+}
+
+function extractLastMessagePreview(records, matchers) {
+  // `records` is expected to already be a small tail window (see readLastJsonLines) in
+  // oldest-to-newest order; scan it newest-to-oldest to find the LAST genuine message.
+  const text = findGenuineMessageText(records.slice().reverse(), matchers);
+  return text === null ? null : buildMessagePreview(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -163,15 +238,15 @@ function isSyntheticClaudeText(text) {
   return looksLikeInjectedDocument(trimmed);
 }
 
+const CLAUDE_MESSAGE_MATCHERS = {
+  isCandidate: (record) => record.type === 'user' && record.isMeta !== true,
+  extractText: (record) => extractMessageText(record.message),
+  isSynthetic: isSyntheticClaudeText,
+};
+
 function extractClaudeTitle(records, maxScan = 20) {
-  for (const record of records.slice(0, maxScan)) {
-    if (record.type !== 'user') continue;
-    if (record.isMeta === true) continue;
-    const text = extractMessageText(record.message);
-    if (isSyntheticClaudeText(text)) continue;
-    return text.trim().slice(0, 120);
-  }
-  return null;
+  const text = findGenuineMessageText(records.slice(0, maxScan), CLAUDE_MESSAGE_MATCHERS);
+  return text === null ? null : text.slice(0, 120);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +294,12 @@ function findClaudeCwdAndBranch(records) {
   return { cwd: null, branch: null };
 }
 
+// Tail scan window for lastMessagePreview: sized larger than the head scan window (20)
+// because agentic sessions often end with a long burst of tool-call/tool-result records
+// after the last real user message, pushing it further back from EOF than a
+// symmetric-to-the-head-window scan would reliably reach.
+const TAIL_MESSAGE_SCAN_WINDOW = 60;
+
 function scanClaudeCodeFile(filePath, homeDir) {
   const records = readFirstJsonLines(filePath, 20);
   if (records.length === 0) {
@@ -232,12 +313,17 @@ function scanClaudeCodeFile(filePath, homeDir) {
   const title =
     extractedTitle || `${displayNameForCwd(effectiveCwd)} (${stat.birthtime.toISOString()})`;
   const pathExists = fs.existsSync(effectiveCwd);
+  const firstMessagePreview = extractFirstMessagePreview(records, CLAUDE_MESSAGE_MATCHERS);
+  const tailRecords = readLastJsonLines(filePath, TAIL_MESSAGE_SCAN_WINDOW);
+  const lastMessagePreview = extractLastMessagePreview(tailRecords, CLAUDE_MESSAGE_MATCHERS);
   return {
     tool: 'claude-code',
     id: path.basename(filePath, '.jsonl'),
     title,
     titleIsFallback,
     pathExists,
+    firstMessagePreview,
+    lastMessagePreview,
     cwd: effectiveCwd,
     branch,
     groupKey: normalizeGroupKey(effectiveCwd, homeDir),
@@ -289,16 +375,19 @@ function isSyntheticCodexText(text) {
   return looksLikeInjectedDocument(trimmed);
 }
 
+const CODEX_MESSAGE_MATCHERS = {
+  isCandidate: (record) =>
+    record.type === 'response_item' &&
+    !!record.payload &&
+    record.payload.type === 'message' &&
+    record.payload.role === 'user',
+  extractText: (record) => extractResponseItemText(record.payload),
+  isSynthetic: isSyntheticCodexText,
+};
+
 function extractCodexTitle(records, maxScan = 20) {
-  for (const record of records.slice(0, maxScan)) {
-    if (record.type !== 'response_item') continue;
-    const payload = record.payload;
-    if (!payload || payload.type !== 'message' || payload.role !== 'user') continue;
-    const text = extractResponseItemText(payload);
-    if (isSyntheticCodexText(text)) continue;
-    return text.trim().slice(0, 120);
-  }
-  return null;
+  const text = findGenuineMessageText(records.slice(0, maxScan), CODEX_MESSAGE_MATCHERS);
+  return text === null ? null : text.slice(0, 120);
 }
 
 function loadCodexIndex(indexFilePath) {
@@ -341,6 +430,9 @@ function scanCodexFile(filePath, indexMap, homeDir) {
   const titleIsFallback = !extractedTitle;
   const title = extractedTitle || `${displayNameForCwd(cwd)} (${stat.birthtime.toISOString()})`;
   const pathExists = fs.existsSync(cwd);
+  const firstMessagePreview = extractFirstMessagePreview(records, CODEX_MESSAGE_MATCHERS);
+  const tailRecords = readLastJsonLines(filePath, TAIL_MESSAGE_SCAN_WINDOW);
+  const lastMessagePreview = extractLastMessagePreview(tailRecords, CODEX_MESSAGE_MATCHERS);
 
   return {
     tool: 'codex',
@@ -348,6 +440,8 @@ function scanCodexFile(filePath, indexMap, homeDir) {
     title,
     titleIsFallback,
     pathExists,
+    firstMessagePreview,
+    lastMessagePreview,
     cwd,
     branch,
     groupKey: normalizeGroupKey(cwd, homeDir),
@@ -438,6 +532,9 @@ function buildHtml(sessions, meta = {}) {
   .tool-badge-claude-code { background: #d97706; }
   .tool-badge-codex { background: #2563eb; }
   button.copy-btn { cursor: pointer; margin-top: 0.4rem; }
+  .preview-toggle { cursor: pointer; color: #555; font-size: 0.85rem; margin-top: 0.4rem; }
+  .preview-body { display: none; margin-top: 0.3rem; font-size: 0.85rem; color: #444; white-space: pre-wrap; }
+  .preview-body.preview-open { display: block; }
   #controls > * { margin-right: 0.5rem; }
   @media (prefers-color-scheme: dark) {
     body { background: #1a1a1a; color: #ddd; }
@@ -452,6 +549,8 @@ function buildHtml(sessions, meta = {}) {
     .tool-badge-claude-code { background: #f59e0b; }
     .tool-badge-codex { background: #60a5fa; }
     button.copy-btn { background: #2a2a2a; color: #ddd; border-color: #555; }
+    .preview-toggle { color: #aaa; }
+    .preview-body { color: #ccc; }
     #controls input, #controls select { background: #2a2a2a; color: #ddd; border-color: #555; }
   }
 </style>
@@ -517,6 +616,37 @@ function buildHtml(sessions, meta = {}) {
       return btn;
     }
 
+    function createPreviewToggle(s) {
+      var wrapper = document.createElement('div');
+      wrapper.className = 'preview-toggle-wrap';
+
+      var toggleEl = document.createElement('div');
+      toggleEl.className = 'preview-toggle';
+      toggleEl.textContent = '▸ 訊息預覽';
+
+      var bodyEl = document.createElement('div');
+      bodyEl.className = 'preview-body';
+
+      var startEl = document.createElement('div');
+      startEl.textContent = '開始：' + (s.firstMessagePreview || '（無）');
+      bodyEl.appendChild(startEl);
+
+      var lastEl = document.createElement('div');
+      lastEl.textContent = '最後：' + (s.lastMessagePreview || '（無）');
+      bodyEl.appendChild(lastEl);
+
+      var expanded = false;
+      toggleEl.addEventListener('click', function () {
+        expanded = !expanded;
+        bodyEl.className = expanded ? 'preview-body preview-open' : 'preview-body';
+        toggleEl.textContent = (expanded ? '▾' : '▸') + ' 訊息預覽';
+      });
+
+      wrapper.appendChild(toggleEl);
+      wrapper.appendChild(bodyEl);
+      return wrapper;
+    }
+
     var QUICK_RESUME_COUNT = 8;
     function renderQuickResume() {
       var container = document.getElementById('quick-resume');
@@ -533,6 +663,7 @@ function buildHtml(sessions, meta = {}) {
         metaEl.textContent = '最後互動：' + s.lastActiveAt;
         card.appendChild(metaEl);
         card.appendChild(createCopyButton(s));
+        card.appendChild(createPreviewToggle(s));
         container.appendChild(card);
       });
     }
@@ -584,6 +715,7 @@ function buildHtml(sessions, meta = {}) {
         card.appendChild(metaEl);
 
         card.appendChild(createCopyButton(s));
+        card.appendChild(createPreviewToggle(s));
 
         container.appendChild(card);
       }
@@ -770,6 +902,7 @@ module.exports = {
   buildResumeCommand,
   parseArgs,
   readFirstJsonLines,
+  readLastJsonLines,
   extractMessageText,
   isSyntheticClaudeText,
   extractClaudeTitle,
