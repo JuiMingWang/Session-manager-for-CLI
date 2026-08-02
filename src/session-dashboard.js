@@ -231,11 +231,13 @@ function scanClaudeCodeFile(filePath, homeDir) {
   const titleIsFallback = !extractedTitle;
   const title =
     extractedTitle || `${displayNameForCwd(effectiveCwd)} (${stat.birthtime.toISOString()})`;
+  const pathExists = fs.existsSync(effectiveCwd);
   return {
     tool: 'claude-code',
     id: path.basename(filePath, '.jsonl'),
     title,
     titleIsFallback,
+    pathExists,
     cwd: effectiveCwd,
     branch,
     groupKey: normalizeGroupKey(effectiveCwd, homeDir),
@@ -338,12 +340,14 @@ function scanCodexFile(filePath, indexMap, homeDir) {
   const extractedTitle = indexTitle || extractCodexTitle(records);
   const titleIsFallback = !extractedTitle;
   const title = extractedTitle || `${displayNameForCwd(cwd)} (${stat.birthtime.toISOString()})`;
+  const pathExists = fs.existsSync(cwd);
 
   return {
     tool: 'codex',
     id,
     title,
     titleIsFallback,
+    pathExists,
     cwd,
     branch,
     groupKey: normalizeGroupKey(cwd, homeDir),
@@ -422,6 +426,8 @@ function buildHtml(sessions, meta = {}) {
   .group-path { color: #888; font-size: 0.8rem; margin: 0.2rem 0 0.5rem; font-family: monospace; }
   .meta { color: #666; font-size: 0.85rem; }
   .title-fallback { color: #888; font-style: italic; }
+  .card-path-missing { filter: grayscale(1); opacity: 0.7; }
+  .path-missing-warning { color: #a33; font-weight: bold; }
   button.copy-btn { cursor: pointer; margin-top: 0.4rem; }
   #controls > * { margin-right: 0.5rem; }
 </style>
@@ -484,12 +490,19 @@ function buildHtml(sessions, meta = {}) {
 
       function renderCard(s, container) {
         var card = document.createElement('div');
-        card.className = 'card';
+        card.className = s.pathExists === false ? 'card card-path-missing' : 'card';
 
         var titleEl = document.createElement('div');
         titleEl.textContent = '[' + s.tool + '] ' + s.title;
         if (s.titleIsFallback) titleEl.className = 'title-fallback';
         card.appendChild(titleEl);
+
+        if (s.pathExists === false) {
+          var warningEl = document.createElement('div');
+          warningEl.className = 'path-missing-warning';
+          warningEl.textContent = '資料夾已不存在';
+          card.appendChild(warningEl);
+        }
 
         var metaEl = document.createElement('div');
         metaEl.className = 'meta';

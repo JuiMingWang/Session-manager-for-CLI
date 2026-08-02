@@ -285,6 +285,31 @@ test('scanClaudeCodeFile falls back to basename+timestamp title when no genuine 
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
+test('scanClaudeCodeFile sets pathExists true when the recorded cwd directory still exists on disk', () => {
+  const dir = makeTempDir();
+  const realProjectDir = pathForTests.join(dir, 'real-project');
+  fsForTests.mkdirSync(realProjectDir, { recursive: true });
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'exists-123.jsonl');
+  writeJsonl(filePath, [
+    { type: 'user', cwd: realProjectDir, message: { content: '這個資料夾還在' } },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.equal(session.pathExists, true, '真實存在的資料夾應標記為 pathExists: true');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCodeFile sets pathExists false when the recorded cwd directory no longer exists on disk', () => {
+  const dir = makeTempDir();
+  const missingProjectDir = pathForTests.join(dir, 'deleted-project');
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'missing-456.jsonl');
+  writeJsonl(filePath, [
+    { type: 'user', cwd: missingProjectDir, message: { content: '這個資料夾已經刪掉了' } },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.equal(session.pathExists, false, '已刪除的資料夾應標記為 pathExists: false');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
 test('scanClaudeCodeFile throws when the file contains zero parseable JSON records', () => {
   const dir = makeTempDir();
   const filePath = pathForTests.join(dir, 'garbage.jsonl');
@@ -501,6 +526,31 @@ test('scanCodexFile falls back to basename+timestamp title when neither index no
   const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
   assert.ok(session.title.startsWith('other-thing ('), session.title);
   assert.equal(session.titleIsFallback, true, '退回資料夾名+時間戳應標記為退而標題');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile sets pathExists true when the recorded cwd directory still exists on disk', () => {
+  const dir = makeTempDir();
+  const realProjectDir = pathForTests.join(dir, 'real-project');
+  fsForTests.mkdirSync(realProjectDir, { recursive: true });
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-exists.jsonl');
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-exists', cwd: realProjectDir } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.equal(session.pathExists, true, '真實存在的資料夾應標記為 pathExists: true');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile sets pathExists false when the recorded cwd directory no longer exists on disk', () => {
+  const dir = makeTempDir();
+  const missingProjectDir = pathForTests.join(dir, 'deleted-project');
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-missing.jsonl');
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-missing', cwd: missingProjectDir } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.equal(session.pathExists, false, '已刪除的資料夾應標記為 pathExists: false');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -792,6 +842,40 @@ test('buildHtml marks a titleIsFallback card with a distinct style, leaving a re
   const fallbackCard = cards.find((c) => c.children[0].textContent.indexOf('proj (2026-08-01') !== -1);
   assert.equal(fallbackCard.children[0].className, 'title-fallback', '退而標題應套用區隔樣式 class');
   assert.notEqual(realCard.children[0].className, 'title-fallback', '真實標題不應套用退而標題樣式');
+});
+
+test('buildHtml marks a pathExists:false card with a warning label and greyscale style, leaving a pathExists:true card unmarked', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'here', title: '路徑還在', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj', pathExists: true,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+    {
+      tool: 'claude-code', id: 'gone', title: '路徑已刪除', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj', pathExists: false,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEl = app.children.find((el) => el.tagName === 'DETAILS');
+  const bodyDiv = detailsEl.children.find((el) => el.tagName === 'DIV');
+  const cards = bodyDiv.children.filter((el) => el.className.indexOf('card') !== -1);
+  assert.equal(cards.length, 2);
+  const existsCard = cards.find((c) => c.children[0].textContent.indexOf('路徑還在') !== -1);
+  const goneCard = cards.find((c) => c.children[0].textContent.indexOf('路徑已刪除') !== -1);
+
+  assert.equal(existsCard.className, 'card', 'pathExists:true 卡片不應套用灰階樣式');
+  assert.ok(goneCard.className.indexOf('card-path-missing') !== -1, 'pathExists:false 卡片應套用灰階樣式 class');
+
+  const goneWarningEl = goneCard.children.find((el) => el.textContent === '資料夾已不存在');
+  assert.ok(goneWarningEl, 'pathExists:false 卡片應顯示「資料夾已不存在」警告標籤');
+  const existsWarningEl = existsCard.children.find((el) => el.textContent === '資料夾已不存在');
+  assert.equal(existsWarningEl, undefined, 'pathExists:true 卡片不應顯示警告標籤');
+
+  const btn = goneCard.children.find((el) => el.tagName === 'BUTTON');
+  assert.ok(btn, 'pathExists:false 卡片的複製按鈕仍須存在，不可被隱藏或移除');
 });
 
 const { writeAtomic } = require('./session-dashboard.js');

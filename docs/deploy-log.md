@@ -34,3 +34,10 @@
 - 測試數：76 → 78（全部通過，無既有測試被破壞）。
 - 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。字串檢查確認產出的 `sessions-dashboard.html` 內 `titleIsFallback":true` 出現 80 次、`titleIsFallback":false` 出現 198 次（共 278 筆 session，約 29% 退而標題，與先前記錄的 28% 量測值相符），`title-fallback` class 定義與套用邏輯皆存在。
 - 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項）——本次刻意維持 `--quiet` 不開瀏覽器（任務指示不可開瀏覽器操作真實資料），故該項留待使用者或下次工作階段人工確認灰階斜體樣式的實際渲染效果。
+
+## 2026-08-02T15:28:30Z
+- 實作 ticket 02（失效路徑可靠性標記）：`scanClaudeCodeFile`／`scanCodexFile` 新增 `pathExists: boolean` 欄位，各自對記錄的專案路徑（Claude Code 是 `effectiveCwd`，Codex 是 `cwd`）執行一次 `fs.existsSync`，逐筆檢查、無快取或去重批次機制（依 ticket 明確要求，不做效能優化）。`buildHtml` 的 `renderCard` 在 `pathExists === false` 時：卡片 class 追加 `card-path-missing`（CSS 設為 `filter: grayscale(1); opacity: 0.7`，整體降對比但仍完全可見可點擊）、並在標題下方插入一個「資料夾已不存在」警告文字 div（新增 `.path-missing-warning` class，紅字加粗）；複製接續指令按鈕維持不變、不隱藏不停用，符合「歷史紀錄保留、不隱藏」的既定原則。
+- 嚴格 TDD：先為 `scanClaudeCodeFile`／`scanCodexFile` 各新增「路徑確實存在」（用真實暫存目錄）與「路徑刻意指向不存在位置」兩種情境測試斷言 `pathExists`，再新增一個透過既有 `runDashboardScript`/`makeFakeElement` DOM 執行手法驗證渲染卡片確實套用 `card-path-missing` class 與警告文字、且複製按鈕仍存在的測試。全部先跑過確認會失敗（red），再實作最小改動讓其通過（green）。
+- 測試數：78 → 83（全部通過，無既有測試被破壞）。
+- 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。字串檢查確認產出的 `sessions-dashboard.html` 內 `"pathExists":false` 出現 18 次、`"pathExists":true` 出現 262 次，`card-path-missing`／「資料夾已不存在」字樣皆存在於產出的 HTML 中。
+- 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項）——本次同樣維持 `--quiet` 不開瀏覽器，僅以字串比對驗證真實資料產出結果，實際灰階視覺效果與警告標籤排版留待使用者或下次工作階段人工確認。
