@@ -473,6 +473,18 @@ function buildHtml(sessions, meta = {}) {
 </html>`;
 }
 
+// ---------------------------------------------------------------------------
+// Atomic write (unique temp file per writer, then rename)
+// ---------------------------------------------------------------------------
+
+function writeAtomic(targetPath, content) {
+  const dir = path.dirname(targetPath);
+  const uniqueSuffix = `${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  const tempPath = path.join(dir, `${path.basename(targetPath)}.${uniqueSuffix}.tmp`);
+  fs.writeFileSync(tempPath, content, 'utf8');
+  fs.renameSync(tempPath, targetPath);
+}
+
 module.exports = {
   escapeHtml,
   embedJsonSafely,
@@ -496,4 +508,5 @@ module.exports = {
   scanCodexFile,
   scanCodex,
   buildHtml,
+  writeAtomic,
 };

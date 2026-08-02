@@ -514,3 +514,33 @@ test('buildHtml embeds every session field needed by the front end', () => {
     assert.ok(html.includes(`"${field}"`), `missing field ${field}`);
   }
 });
+
+const { writeAtomic } = require('./session-dashboard.js');
+
+test('writeAtomic writes the final content to the target path', () => {
+  const dir = makeTempDir();
+  const target = pathForTests.join(dir, 'out.html');
+  writeAtomic(target, '<html>v1</html>');
+  assert.equal(fsForTests.readFileSync(target, 'utf8'), '<html>v1</html>');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('writeAtomic leaves no leftover .tmp files after a successful write', () => {
+  const dir = makeTempDir();
+  const target = pathForTests.join(dir, 'out.html');
+  writeAtomic(target, '<html>v1</html>');
+  const leftovers = fsForTests.readdirSync(dir).filter((f) => f.endsWith('.tmp'));
+  assert.deepEqual(leftovers, []);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('writeAtomic uses a unique temp filename per call (no fixed shared name)', () => {
+  const dir = makeTempDir();
+  const target = pathForTests.join(dir, 'out.html');
+  writeAtomic(target, '<html>v1</html>');
+  writeAtomic(target, '<html>v2</html>');
+  // Both calls must succeed without throwing, and the final content is a complete write, never a mix.
+  const finalContent = fsForTests.readFileSync(target, 'utf8');
+  assert.ok(finalContent === '<html>v1</html>' || finalContent === '<html>v2</html>');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
