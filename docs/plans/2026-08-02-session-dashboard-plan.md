@@ -166,7 +166,7 @@ function escapeHtml(str) {
 }
 
 function embedJsonSafely(data) {
-  return JSON.stringify(data).replace(/</g, '\\u003c');
+  return JSON.stringify(data).replace(/[<>]/g, (ch) => (ch === '<' ? '\\u003c' : '\\u003e'));
 }
 
 function normalizePath(p) {
