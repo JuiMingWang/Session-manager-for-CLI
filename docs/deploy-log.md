@@ -48,3 +48,11 @@
 - 測試數：83 → 84（全部通過，無既有測試被破壞）。
 - 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。字串檢查確認產出的 `sessions-dashboard.html` 內共 47 筆 `"tool":"claude-code"`、233 筆 `"tool":"codex"`（合計 280 筆 session），且 `.tool-badge`／`.tool-badge-claude-code`／`.tool-badge-codex` 三條 CSS 規則皆存在於內嵌 `<style>` 區塊。
 - 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項）——本次同樣維持 `--quiet` 不開瀏覽器，色塊是由前端 script 於執行時動態產生（不會出現在靜態 HTML 原始碼中），僅能以 DOM 測試與 CSS 規則存在性驗證邏輯正確，橙／藍兩色實際並排呈現的視覺效果與淺色模式下的清晰度留待使用者或下次工作階段人工確認。
+
+## 2026-08-02T15:41:32Z
+- 實作 ticket 04（複製接續指令按鈕回饋）：`renderCard` 的複製按鈕點擊事件在呼叫 `navigator.clipboard.writeText(cmd)` 後，立即把按鈕文字改成「已複製✓」，並用 `setTimeout` 排一個 1500ms 後恢復原文字（`複製續接指令`，抽成 `COPY_BTN_LABEL` 變數避免字串重複）的計時器；計時器參照存在按鈕點擊 handler 外層閉包的 `copyResetTimer` 變數（`renderCard` 每次呼叫都建立新的閉包，故每顆按鈕的計時器彼此獨立、互不干擾）。連續快速點擊時，每次點擊都先 `clearTimeout(copyResetTimer)` 清掉前一個尚未觸發的計時器再重新設定，因此不會有兩個計時器競爭、也不會被舊計時器提前恢復或卡在「已複製✓」回不去。未新增任何 DOM 元素（無 toast／彈窗），只改動按鈕自身 `textContent`。
+- 嚴格 TDD：先擴充既有的 `runDashboardScript` 測試手法——`makeFakeElement` 補上 `_clickHandlers` 陣列與可呼叫的 `click()`（原本 `addEventListener` 是完全空操作，點擊事件從未被實際觸發過），並在 `runDashboardScript` 的 sandbox 補上 Node 真實的 `setTimeout`／`clearTimeout`（`node:vm` 的 contextify sandbox 預設不含這兩個全域函式，前端 script 一呼叫就會 `ReferenceError`）。新增三個測試：(1) 點擊後按鈕文字立即變成「已複製✓」；(2) 等待超過延遲時間後文字自動恢復（用真實 `setTimeout` 實際等待，非模擬計時器）；(3) 短時間內連續點擊兩次，驗證第一次的計時器確實被清除（不會在第一次計時器原訂觸發時間提前恢復）、且最終仍會在第二次點擊排定的時間正常恢復、不卡住。三個測試先跑過確認全部失敗（red，錯誤訊息皆為 `'複製續接指令' !== '已複製✓'`），再加入上述最小實作讓其通過（green）。
+- 語意釐清：ticket 原文「`navigator.clipboard.writeText` 執行後」解讀為「呼叫該函式之後」（同步接著變更文字），而非等待其回傳的 Promise resolve——因為即時視覺回饋比等待非同步剪貼簿寫入完成更符合使用者體驗預期，且測試環境的假 `navigator.clipboard.writeText` 目前回傳 `undefined`（非 Promise），採同步做法可維持假物件最小改動；未改動 `navigator` fake。
+- 測試數：84 → 87（全部通過，無既有測試被破壞）。
+- 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。
+- 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項，含確認剪貼簿內容正確）——本次同樣維持 `--quiet` 不開瀏覽器操作真實資料，按鈕文字即時變化與計時器行為已透過 `node:vm` 執行內嵌前端 script 並用真實 `setTimeout` 驗證（非僅字串斷言），但實際瀏覽器中的視覺呈現與剪貼簿寫入結果留待使用者或下次工作階段人工確認。

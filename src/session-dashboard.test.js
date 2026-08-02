@@ -693,8 +693,10 @@ function makeFakeElement(tag) {
     value: '',
     open: false,
     children: [],
+    _clickHandlers: [],
     appendChild(child) { this.children.push(child); return child; },
-    addEventListener() {},
+    addEventListener(type, fn) { if (type === 'click') this._clickHandlers.push(fn); },
+    click() { this._clickHandlers.forEach((fn) => fn()); },
   };
 }
 
@@ -718,6 +720,8 @@ function runDashboardScript(html, controlValues = {}) {
       },
     },
     navigator: { clipboard: { writeText() {} } },
+    setTimeout,
+    clearTimeout,
   };
   vm.createContext(sandbox);
   const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
@@ -906,6 +910,56 @@ test('buildHtml renders a distinct tool-badge class for claude-code vs codex ses
   assert.notEqual(ccBadge.className, cxBadge.className, 'claude-code 與 codex 的色塊徽章應套用不同 class 以呈現不同顏色');
   assert.equal(ccBadge.className, 'tool-badge tool-badge-claude-code');
   assert.equal(cxBadge.className, 'tool-badge tool-badge-codex');
+});
+
+function buildSingleSessionHtmlForCopyTests() {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'copy-test', title: 't', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  return buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+}
+
+function findCopyButton(app) {
+  const detailsEl = app.children.find((el) => el.tagName === 'DETAILS');
+  const bodyDiv = detailsEl.children.find((el) => el.tagName === 'DIV');
+  const card = bodyDiv.children.find((el) => el.className.indexOf('card') !== -1);
+  return card.children.find((el) => el.tagName === 'BUTTON');
+}
+
+test('點擊複製按鈕後，按鈕文字立即變成「已複製✓」', () => {
+  const html = buildSingleSessionHtmlForCopyTests();
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const btn = findCopyButton(app);
+  assert.equal(btn.textContent, '複製續接指令');
+  btn.click();
+  assert.equal(btn.textContent, '已複製✓');
+});
+
+test('點擊複製按鈕後，經過延遲時間文字自動恢復原本文字', async () => {
+  const html = buildSingleSessionHtmlForCopyTests();
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const btn = findCopyButton(app);
+  btn.click();
+  assert.equal(btn.textContent, '已複製✓');
+  await new Promise((resolve) => setTimeout(resolve, 1700));
+  assert.equal(btn.textContent, '複製續接指令');
+});
+
+test('連續快速點擊複製按鈕不會讓文字卡住，也不會被舊計時器提前恢復', async () => {
+  const html = buildSingleSessionHtmlForCopyTests();
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const btn = findCopyButton(app);
+  btn.click();
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  btn.click();
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(btn.textContent, '已複製✓', '第一次點擊的計時器應已被第二次點擊清除，不應提前恢復');
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.equal(btn.textContent, '複製續接指令', '第二次點擊的計時器應正常觸發恢復，不會卡住');
 });
 
 const { writeAtomic } = require('./session-dashboard.js');

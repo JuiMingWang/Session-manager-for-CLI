@@ -517,13 +517,21 @@ function buildHtml(sessions, meta = {}) {
 
         var btn = document.createElement('button');
         btn.className = 'copy-btn';
-        btn.textContent = '複製續接指令';
+        var COPY_BTN_LABEL = '複製續接指令';
+        btn.textContent = COPY_BTN_LABEL;
+        var copyResetTimer = null;
         btn.addEventListener('click', function () {
           // Single-quoted PowerShell string, matching buildResumeCommand's escaping in session-dashboard.js:
           // double-quoted strings would let a real folder name containing $ or a backtick corrupt the command.
           var safeCwd = String(s.cwd).replace(/'/g, "''");
           var cmd = "Set-Location -LiteralPath '" + safeCwd + "'; " + (s.tool === 'codex' ? 'codex resume' : 'claude --resume') + ' ' + s.id;
           navigator.clipboard.writeText(cmd);
+          btn.textContent = '已複製✓';
+          if (copyResetTimer) clearTimeout(copyResetTimer);
+          copyResetTimer = setTimeout(function () {
+            btn.textContent = COPY_BTN_LABEL;
+            copyResetTimer = null;
+          }, 1500);
         });
         card.appendChild(btn);
 
