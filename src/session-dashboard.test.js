@@ -466,3 +466,51 @@ test('scanCodex skips a file with zero parseable JSON and counts it, still retur
   assert.equal(skipped, 1);
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
+
+const { buildHtml } = require('./session-dashboard.js');
+
+test('buildHtml embeds session data without a raw </script> breakout', () => {
+  const sessions = [
+    {
+      tool: 'claude-code',
+      id: 'abc',
+      title: '</script><script>alert(1)</script>',
+      cwd: 'C:\\work\\<proj>',
+      branch: null,
+      groupKey: 'c:/work/proj',
+      displayName: 'proj',
+      startedAt: '2026-08-01T00:00:00.000Z',
+      lastActiveAt: '2026-08-01T01:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T00:00:00.000Z', skippedCount: 0 });
+  assert.ok(!html.includes('</script><script>alert(1)</script>'), 'dangerous string must not appear raw');
+  assert.ok(html.includes('\\u003c/script\\u003e'));
+  assert.ok(html.includes('<title>Session'));
+});
+
+test('buildHtml includes generatedAt and skippedCount in the embedded payload', () => {
+  const html = buildHtml([], { generatedAt: '2026-08-02T00:00:00.000Z', skippedCount: 3 });
+  assert.ok(html.includes('"generatedAt":"2026-08-02T00:00:00.000Z"'));
+  assert.ok(html.includes('"skippedCount":3'));
+});
+
+test('buildHtml defaults generatedAt/skippedCount when meta is omitted', () => {
+  const html = buildHtml([]);
+  assert.ok(html.includes('"skippedCount":0'));
+  assert.ok(/"generatedAt":"\d{4}-\d{2}-\d{2}T/.test(html));
+});
+
+test('buildHtml embeds every session field needed by the front end', () => {
+  const sessions = [
+    {
+      tool: 'codex', id: 'xyz', title: '正常標題', cwd: 'C:\\work\\proj', branch: 'main',
+      groupKey: 'c:/work/proj', displayName: 'proj',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T01:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions);
+  for (const field of ['tool', 'id', 'title', 'cwd', 'branch', 'groupKey', 'displayName', 'startedAt', 'lastActiveAt']) {
+    assert.ok(html.includes(`"${field}"`), `missing field ${field}`);
+  }
+});
