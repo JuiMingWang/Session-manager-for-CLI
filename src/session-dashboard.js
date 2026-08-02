@@ -105,6 +105,31 @@ function readFirstJsonLines(filePath, n) {
 }
 
 // ---------------------------------------------------------------------------
+// Structural fallback for detecting injected/synthetic text
+// ---------------------------------------------------------------------------
+//
+// A prefix whitelist can never be exhaustive — tools and IDEs add new injected
+// content formats over time, and each one we haven't seen yet slips through as
+// if it were a genuine human message (confirmed on real data: a "# AGENTS.md
+// instructions ..." injection block was accepted as a session title because
+// its exact prefix wasn't on the list). This adds a second, structural check:
+// long text that opens with a markdown heading or an XML-like tag, or contains
+// multiple heading lines, is treated as an injected document regardless of its
+// specific prefix. The length gate exists so a short genuine message that
+// merely starts with "#" or "<" (e.g. a real one-line question about markup)
+// isn't wrongly rejected — only long, structurally document-shaped text is
+// flagged this way.
+
+const INJECTED_DOCUMENT_MIN_LENGTH = 150;
+
+function looksLikeInjectedDocument(text) {
+  if (text.length < INJECTED_DOCUMENT_MIN_LENGTH) return false;
+  if (/^[<#]/.test(text)) return true;
+  const headingLineCount = (text.match(/^#{1,6}\s/gm) || []).length;
+  return headingLineCount >= 2;
+}
+
+// ---------------------------------------------------------------------------
 // Claude Code title extraction
 // ---------------------------------------------------------------------------
 
@@ -134,7 +159,8 @@ function extractMessageText(message) {
 function isSyntheticClaudeText(text) {
   const trimmed = String(text).trim();
   if (!trimmed) return true;
-  return CLAUDE_SYNTHETIC_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+  if (CLAUDE_SYNTHETIC_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return true;
+  return looksLikeInjectedDocument(trimmed);
 }
 
 function extractClaudeTitle(records, maxScan = 20) {
@@ -255,7 +281,8 @@ function extractResponseItemText(payload) {
 function isSyntheticCodexText(text) {
   const trimmed = String(text).trim();
   if (!trimmed) return true;
-  return CODEX_SYNTHETIC_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+  if (CODEX_SYNTHETIC_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return true;
+  return looksLikeInjectedDocument(trimmed);
 }
 
 function extractCodexTitle(records, maxScan = 20) {

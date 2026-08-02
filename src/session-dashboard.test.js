@@ -119,6 +119,39 @@ test('isSyntheticClaudeText flags <command-name> and <local-command-stdout/stder
   assert.equal(isSyntheticClaudeText('<local-command-stderr>some error output</local-command-stderr>'), true);
 });
 
+// Regression test for a real misclassification found during manual browser QA of the deployed
+// dashboard: a Codex session's title showed up as an injected "# AGENTS.md instructions ..."
+// block instead of a real human message or a basename+timestamp fallback. The known-prefix
+// whitelist can never be exhaustive — new injection formats appear whenever a tool/IDE changes
+// what it prepends. This adds a structural fallback: long text that opens with a markdown
+// heading or an XML-like tag, or contains multiple markdown heading lines, is treated as an
+// injected document rather than a human message — regardless of whether its specific prefix
+// is on the whitelist. The length gate (150 chars) exists so a short genuine message that
+// merely starts with "#" or "<" (e.g. a real one-line question about some markup) isn't
+// wrongly rejected — only long, structurally document-shaped text is flagged this way.
+test('isSyntheticClaudeText flags an unrecognized long injected document by structure (length + heading/tag opener), not just by prefix whitelist', () => {
+  // Real example captured from this machine's own Codex session data (a genuine AGENTS.md
+  // injection this machine's tooling produces) — not on any prefix list, would previously
+  // have been accepted as a real title.
+  const realInjectedAgentsMd =
+    '# AGENTS.md instructions\n\n<INSTRUCTIONS>\n1.盡量輸出簡潔，說明重點。\n2.每完成我要求的代碼修改時，需建立一個Git，並且Git的名稱須以簡潔中文呈現。\n3.每次展開一個新的項目時，需主動問我是否要將任務拆分成多個簡單任務執行。\n4.寫代碼時，變數命名須明確，註釋要清晰。\n5.寫項目的時候，盡量以架構師的假度去考慮，不要產生超大文件。數據結構要精簡、結構邏輯要合理。\n6.確實按照規畫的去執行。\n7.在開始進行代碼修改與編寫前，需簡潔地向我提出修改方法以及問我是否需要將任務拆分。\n</INSTRUCTIONS>\n<environment_context>\n  <cwd>C:\\Users\\sjack\\OneDrive\\Documents\\PDF名稱修改</cwd>\n</environment_context>';
+  assert.equal(isSyntheticClaudeText(realInjectedAgentsMd), true);
+});
+
+test('isSyntheticClaudeText does NOT flag a short genuine message merely because it starts with # or <', () => {
+  assert.equal(isSyntheticClaudeText('#urgent 這個功能壞了，麻煩幫我看一下'), false);
+  assert.equal(isSyntheticClaudeText('<div> 這個標籤在我的畫面上沒有正確渲染，為什麼？'), false);
+});
+
+test('isSyntheticClaudeText does NOT flag a long genuine message that has no heading/tag structure', () => {
+  const longGenuineMessage =
+    '我這邊想把整個資料匯入流程重新設計一下，目前的做法是先讀取 CSV，再逐行寫入資料庫，這樣速度太慢，' +
+    '想改成批次寫入，並且加上失敗重試機制，你覺得這個方向合理嗎？順便也想問一下要不要加上進度條顯示，' +
+    '另外我也在想是不是該把這個流程拆成兩個獨立的服務，一個專門負責匯入、一個負責驗證資料正確性，這樣未來比較好維護。';
+  assert.ok(longGenuineMessage.length > 150, 'sanity check: must actually exceed the length gate');
+  assert.equal(isSyntheticClaudeText(longGenuineMessage), false);
+});
+
 test('extractClaudeTitle skips isMeta records and synthetic-wrapped records, picks first genuine human text', () => {
   const records = [
     { type: 'user', isMeta: true, message: { content: '<local-command-caveat>Caveat: ...' } },
@@ -359,6 +392,25 @@ test('isSyntheticCodexText flags known injected prefixes observed in real rollou
   assert.equal(isSyntheticCodexText('<permissions instructions>\nFilesystem sandboxing...'), true);
   assert.equal(isSyntheticCodexText('# Context from my IDE setup:\n\n## Open tabs:'), true);
   assert.equal(isSyntheticCodexText('幫我修一下這個 bug'), false);
+});
+
+// Regression test for a real misclassification found during manual browser QA: a Codex
+// session's title showed up as a raw "# AGENTS.md instructions ..." injection block, which
+// is not on CODEX_SYNTHETIC_PREFIXES (that list only covers environment_context/recommended_
+// plugins/permissions-instructions/IDE-tabs — the actual set of injected formats real tools
+// produce is not exhaustively enumerable). Same structural fallback as the Claude Code side:
+// long text opening with a heading/tag, or containing multiple heading lines, is treated as
+// an injected document regardless of whether its specific prefix was ever seen before.
+test('isSyntheticCodexText flags an unrecognized long injected document by structure, not just by prefix whitelist', () => {
+  // Real example captured from this machine's own Codex rollout data.
+  const realInjectedAgentsMd =
+    '# AGENTS.md instructions\n\n<INSTRUCTIONS>\n1.盡量輸出簡潔，說明重點。\n2.每完成我要求的代碼修改時，需建立一個Git，並且Git的名稱須以簡潔中文呈現。\n3.每次展開一個新的項目時，需主動問我是否要將任務拆分成多個簡單任務執行。\n4.寫代碼時，變數命名須明確，註釋要清晰。\n5.寫項目的時候，盡量以架構師的假度去考慮，不要產生超大文件。數據結構要精簡、結構邏輯要合理。\n6.確實按照規畫的去執行。\n7.在開始進行代碼修改與編寫前，需簡潔地向我提出修改方法以及問我是否需要將任務拆分。\n</INSTRUCTIONS>\n<environment_context>\n  <cwd>C:\\Users\\sjack\\OneDrive\\Documents\\PDF名稱修改</cwd>\n</environment_context>';
+  assert.equal(isSyntheticCodexText(realInjectedAgentsMd), true);
+});
+
+test('isSyntheticCodexText does NOT flag a short genuine message merely because it starts with # or <', () => {
+  assert.equal(isSyntheticCodexText('#urgent 這個功能壞了，麻煩幫我看一下'), false);
+  assert.equal(isSyntheticCodexText('<div> 這個標籤在我的畫面上沒有正確渲染，為什麼？'), false);
 });
 
 test('extractCodexTitle only considers response_item/message/role=user records', () => {
