@@ -14,3 +14,9 @@
 - Redeployed both fixes to ~/.claude/scripts/session-dashboard.js and regenerated the dashboard.
 - Verified against real data: 263 sessions, 0 sessions still showing the AGENTS.md-injection title, home-directory sessions correctly grouped as misc (visually confirmed via screenshot).
 - Noted for follow-up: 73/263 (28%) of sessions still fall back to basename+timestamp titles — this is the already-disclosed N=20 scan-window tradeoff, now with a real measured rate. Flagged to the user as a separate discussion, not fixed in this pass.
+
+## 2026-08-02T11:54:09Z
+- User feedback after visual review: (1) some titles look like the session's literal first message (working as designed; one specific case turned out to be an indistinguishable automated MCP-trigger message, not a bug — documented limitation), (2) same session showing as duplicate cards, (3) same project split into multiple unexplained blocks across drives.
+- Root-caused (2) with real data: Claude Code writes a fresh jsonl copy per project folder location when a project moves/is copied across drives — same session id, multiple physical files. Fixed via dedupeSessions() (commit f0e6f53): dedupe by (tool, id), keep the entry with the latest lastActiveAt. Verified: 0 duplicate (tool,id) pairs remain in real data (previously 5 duplicate ids, 14 physical entries).
+- Addressed (3) per user's explicit choice (keep full-path grouping, add visual linking): same-displayName groups now render under one shared cluster heading with a "(N 個位置)" count, and each sub-block shows its real path. Verified in browser: "經營模擬遊戲（3 個位置）" cluster correctly shows all 3 real paths (OneDrive, local Documents, G-drive).
+- Redeployed to ~/.claude/scripts/session-dashboard.js and regenerated the dashboard.
