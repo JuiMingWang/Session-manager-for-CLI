@@ -544,3 +544,49 @@ test('writeAtomic uses a unique temp filename per call (no fixed shared name)', 
   assert.ok(finalContent === '<html>v1</html>' || finalContent === '<html>v2</html>');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
+
+const { main } = require('./session-dashboard.js');
+
+test('main scans both sources, writes the dashboard, and skips opening the browser in --quiet mode', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const codexHomeDir = pathForTests.join(dir, 'codex-home');
+  writeJsonl(pathForTests.join(claudeHomeDir, 'projects', 'proj', 'aaa.jsonl'), [
+    { type: 'user', cwd: 'C:\work\proj', gitBranch: 'main', message: { content: '第一個 session' } },
+  ]);
+  writeJsonl(pathForTests.join(codexHomeDir, 'sessions', 'rollout-bbb.jsonl'), [
+    { type: 'session_meta', payload: { id: 'bbb', cwd: 'C:\work\proj' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '第二個 session' }] } },
+  ]);
+
+  let browserOpened = false;
+  const result = main(['--quiet'], {
+    claudeHomeDir,
+    codexHomeDir,
+    openBrowser: () => { browserOpened = true; },
+  });
+
+  assert.equal(browserOpened, false, '--quiet must not open the browser');
+  assert.equal(result.sessionCount, 2);
+  assert.equal(result.skippedCount, 0);
+  assert.equal(result.targetPath, pathForTests.join(claudeHomeDir, 'sessions-dashboard.html'));
+  const html = fsForTests.readFileSync(result.targetPath, 'utf8');
+  assert.ok(html.includes('第一個 session'));
+  assert.ok(html.includes('第二個 session'));
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('main opens the browser when --quiet is not passed', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const codexHomeDir = pathForTests.join(dir, 'codex-home-missing');
+  writeJsonl(pathForTests.join(claudeHomeDir, 'projects', 'proj', 'ccc.jsonl'), [
+    { type: 'user', cwd: 'C:\work\proj', message: { content: '一個 session' } },
+  ]);
+
+  let openedPath = null;
+  main([], { claudeHomeDir, codexHomeDir, openBrowser: (p) => { openedPath = p; } });
+
+  assert.equal(openedPath, pathForTests.join(claudeHomeDir, 'sessions-dashboard.html'));
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});

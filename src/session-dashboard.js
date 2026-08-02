@@ -485,6 +485,35 @@ function writeAtomic(targetPath, content) {
   fs.renameSync(tempPath, targetPath);
 }
 
+// ---------------------------------------------------------------------------
+// CLI entry point
+// ---------------------------------------------------------------------------
+
+function defaultOpenBrowser(targetPath) {
+  execFile('cmd.exe', ['/c', 'start', '', targetPath]);
+}
+
+function main(argv, options = {}) {
+  const { quiet } = parseArgs(argv);
+  const homeDir = os.homedir();
+  const claudeHomeDir = options.claudeHomeDir || path.join(homeDir, '.claude');
+  const codexHomeDir = options.codexHomeDir || path.join(homeDir, '.codex');
+  const openBrowser = options.openBrowser || defaultOpenBrowser;
+
+  const claudeResult = scanClaudeCode(claudeHomeDir);
+  const codexResult = scanCodex(codexHomeDir);
+  const sessions = [...claudeResult.sessions, ...codexResult.sessions];
+  const skippedCount = claudeResult.skipped + codexResult.skipped;
+
+  const html = buildHtml(sessions, { generatedAt: new Date().toISOString(), skippedCount });
+  const targetPath = path.join(claudeHomeDir, 'sessions-dashboard.html');
+  writeAtomic(targetPath, html);
+
+  if (!quiet) openBrowser(targetPath);
+
+  return { targetPath, sessionCount: sessions.length, skippedCount };
+}
+
 module.exports = {
   escapeHtml,
   embedJsonSafely,
@@ -509,4 +538,9 @@ module.exports = {
   scanCodex,
   buildHtml,
   writeAtomic,
+  main,
 };
+
+if (require.main === module) {
+  main(process.argv.slice(2));
+}
