@@ -305,6 +305,37 @@ test('scanClaudeCode returns empty result when the projects directory does not e
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
+// Regression test for a real bug found during manual browser QA of the deployed dashboard:
+// main() was passing claudeHomeDir/codexHomeDir (e.g. ~/.claude, ~/.codex) as the "homeDir"
+// grouping reference into scanClaudeCode/scanCodex, instead of the real OS home directory
+// (~/). Because those two paths are never equal, every home-directory session (the exact
+// case this whole tool was built to declutter) silently failed to group as "misc" and
+// instead got its own group literally titled after the home folder's basename.
+test('scanClaudeCode groups a home-directory session as misc using a real home dir distinct from claudeHomeDir', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const realHomeDir = 'C:\\Users\\sjack';
+  writeJsonl(pathForTests.join(claudeHomeDir, 'projects', 'C--Users-sjack', 'home-session.jsonl'), [
+    { type: 'user', cwd: realHomeDir, message: { content: '隨手問一個小問題' } },
+  ]);
+  const { sessions } = scanClaudeCode(claudeHomeDir, realHomeDir);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].groupKey, '__misc__');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCode does NOT default the grouping reference to claudeHomeDir when realHomeDir is passed explicitly (guards against reintroducing the bug)', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const realHomeDir = pathForTests.join(dir, 'a-completely-different-real-home');
+  writeJsonl(pathForTests.join(claudeHomeDir, 'projects', 'proj', 'a.jsonl'), [
+    { type: 'user', cwd: claudeHomeDir, message: { content: '這個 cwd 剛好等於 claudeHomeDir，不該被誤判成 misc' } },
+  ]);
+  const { sessions } = scanClaudeCode(claudeHomeDir, realHomeDir);
+  assert.notEqual(sessions[0].groupKey, '__misc__');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
 const {
   extractResponseItemText,
   isSyntheticCodexText,
@@ -467,6 +498,20 @@ test('scanCodex skips a file with zero parseable JSON and counts it, still retur
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
+// Same regression as scanClaudeCode's home-directory misc-grouping bug, for the Codex adapter.
+test('scanCodex groups a home-directory session as misc using a real home dir distinct from codexHomeDir', () => {
+  const dir = makeTempDir();
+  const codexHomeDir = pathForTests.join(dir, 'codex-home');
+  const realHomeDir = 'C:\\Users\\sjack';
+  writeJsonl(pathForTests.join(codexHomeDir, 'sessions', 'home-session.jsonl'), [
+    { type: 'session_meta', payload: { id: 'h1', cwd: realHomeDir } },
+  ]);
+  const { sessions } = scanCodex(codexHomeDir, realHomeDir);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].groupKey, '__misc__');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
 const { buildHtml } = require('./session-dashboard.js');
 
 test('buildHtml embeds session data without a raw </script> breakout', () => {
@@ -588,5 +633,27 @@ test('main opens the browser when --quiet is not passed', () => {
   main([], { claudeHomeDir, codexHomeDir, openBrowser: (p) => { openedPath = p; } });
 
   assert.equal(openedPath, pathForTests.join(claudeHomeDir, 'sessions-dashboard.html'));
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+// Integration-level regression test: main() must pass the REAL os.homedir() as the grouping
+// reference into scanClaudeCode/scanCodex, not claudeHomeDir/codexHomeDir. main() always uses
+// the real os.homedir() internally (it's not injectable via options, unlike claudeHomeDir/
+// codexHomeDir), so this test uses the real value directly to prove the full wiring end-to-end.
+test('main groups a session whose cwd is the real home directory as misc, not its own project group', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const codexHomeDir = pathForTests.join(dir, 'codex-home-missing');
+  const realHome = osForTests.homedir();
+  writeJsonl(pathForTests.join(claudeHomeDir, 'projects', 'home', 'ddd.jsonl'), [
+    { type: 'user', cwd: realHome, message: { content: '在家目錄隨手問的問題' } },
+  ]);
+
+  const result = main(['--quiet'], { claudeHomeDir, codexHomeDir, openBrowser: () => {} });
+  const html = fsForTests.readFileSync(result.targetPath, 'utf8');
+  const dataMatch = html.match(/var DATA = (.*);\n\s*\(function/);
+  const data = JSON.parse(dataMatch[1].replace(/\\u003c/g, '<').replace(/\\u003e/g, '>'));
+  assert.equal(data.sessions.length, 1);
+  assert.equal(data.sessions[0].groupKey, '__misc__', 'a real home-directory session must be grouped as misc, not as its own project');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });

@@ -217,14 +217,14 @@ function scanClaudeCodeFile(filePath, homeDir) {
   };
 }
 
-function scanClaudeCode(claudeHomeDir) {
+function scanClaudeCode(claudeHomeDir, realHomeDir = os.homedir()) {
   const projectsDir = path.join(claudeHomeDir, 'projects');
   const files = walkJsonlFiles(projectsDir, ['subagents']);
   const sessions = [];
   let skipped = 0;
   for (const file of files) {
     try {
-      sessions.push(scanClaudeCodeFile(file, claudeHomeDir));
+      sessions.push(scanClaudeCodeFile(file, realHomeDir));
     } catch (err) {
       skipped += 1;
     }
@@ -322,7 +322,7 @@ function scanCodexFile(filePath, indexMap, homeDir) {
   };
 }
 
-function scanCodex(codexHomeDir) {
+function scanCodex(codexHomeDir, realHomeDir = os.homedir()) {
   if (!fs.existsSync(codexHomeDir)) return { sessions: [], skipped: 0 };
   const indexMap = loadCodexIndex(path.join(codexHomeDir, 'session_index.jsonl'));
   const files = [
@@ -333,7 +333,7 @@ function scanCodex(codexHomeDir) {
   let skipped = 0;
   for (const file of files) {
     try {
-      sessions.push(scanCodexFile(file, indexMap, codexHomeDir));
+      sessions.push(scanCodexFile(file, indexMap, realHomeDir));
     } catch (err) {
       skipped += 1;
     }
@@ -500,8 +500,8 @@ function main(argv, options = {}) {
   const codexHomeDir = options.codexHomeDir || path.join(homeDir, '.codex');
   const openBrowser = options.openBrowser || defaultOpenBrowser;
 
-  const claudeResult = scanClaudeCode(claudeHomeDir);
-  const codexResult = scanCodex(codexHomeDir);
+  const claudeResult = scanClaudeCode(claudeHomeDir, homeDir);
+  const codexResult = scanCodex(codexHomeDir, homeDir);
   const sessions = [...claudeResult.sessions, ...codexResult.sessions];
   const skippedCount = claudeResult.skipped + codexResult.skipped;
 
