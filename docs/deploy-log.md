@@ -27,3 +27,10 @@
 - 實作 (2)：每個分組（含雜項/隨手）改用原生 `<details>/<summary>` 摺疊，預設只展開最近活動的前 5 個分組，其餘收合；當使用者輸入搜尋文字時，強制展開所有符合的分組（不受名次限制），避免搜尋結果被摺疊擋住。
 - 測試：新增 5 個行為測試，透過 node:vm 建立最小 DOM stub 實際執行內嵌的前端 script（而非只檢查字串），驗證摺疊/展開的實際渲染結果——因為同一段渲染/分組程式碼過去已經出過兩次僅靠字串測試抓不到的整合性 bug。全部 76 個測試通過。
 - 部署驗證：重新產生的 sessions-dashboard.html 經 `agent session` 開啟後，實測真實資料共 24 個分組，預設展開 5 個、收合 19 個，搜尋「經營模擬遊戲」時 3 個符合的分組全部展開（含原本收合的），行為與設計一致。
+
+## 2026-08-02T15:23:05Z
+- 實作 ticket 01（退而標題可靠性標記）：`scanClaudeCodeFile`／`scanCodexFile` 新增 `titleIsFallback: boolean` 欄位——先把 `extractClaudeTitle`／`extractCodexTitle`（Codex 再加 index thread_name）的結果存成變數，再據此同時決定 `title` 與 `titleIsFallback`，不重複呼叫擷取邏輯。`buildHtml` 的 `renderCard` 在 `titleIsFallback === true` 時為標題 div 套用新增的 `.title-fallback` CSS class（沿用既有 `.meta` 灰階色 `#888`，加 `font-style: italic`），與真實標題明顯區隔。
+- 嚴格 TDD：先擴充既有的 `scanClaudeCodeFile`（真實標題／退回標題兩種情境）與 `scanCodexFile`（index 標題／file-scan 標題兩種情境）測試斷言 `titleIsFallback`，另新增一個 Codex「index 與 file-scan 皆找不到、真的退回資料夾名+時間戳」的情境測試（先前完全沒有涵蓋這條路徑），以及一個透過既有 `runDashboardScript`/`makeFakeElement`（`node:vm` DOM 執行手法）驗證渲染出的卡片標題 div 確實套用 `title-fallback` class、真實標題不套用的測試。全部先跑過確認會失敗，再實作最小改動讓其通過。
+- 測試數：76 → 78（全部通過，無既有測試被破壞）。
+- 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。字串檢查確認產出的 `sessions-dashboard.html` 內 `titleIsFallback":true` 出現 80 次、`titleIsFallback":false` 出現 198 次（共 278 筆 session，約 29% 退而標題，與先前記錄的 28% 量測值相符），`title-fallback` class 定義與套用邏輯皆存在。
+- 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項）——本次刻意維持 `--quiet` 不開瀏覽器（任務指示不可開瀏覽器操作真實資料），故該項留待使用者或下次工作階段人工確認灰階斜體樣式的實際渲染效果。

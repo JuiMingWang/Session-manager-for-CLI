@@ -264,6 +264,7 @@ test('scanClaudeCodeFile extracts title, cwd, branch, group key from a real-shap
   assert.equal(session.branch, 'main');
   assert.equal(session.displayName, 'my-project');
   assert.equal(session.groupKey, normalizeGroupKeyForTest());
+  assert.equal(session.titleIsFallback, false, '真實標題不應標記為退而標題');
 
   function normalizeGroupKeyForTest() {
     const { normalizeGroupKey: fn } = require('./session-dashboard.js');
@@ -280,6 +281,7 @@ test('scanClaudeCodeFile falls back to basename+timestamp title when no genuine 
   ]);
   const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
   assert.ok(session.title.startsWith('other-project ('), session.title);
+  assert.equal(session.titleIsFallback, true, '退回資料夾名+時間戳應標記為退而標題');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -471,6 +473,7 @@ test('scanCodexFile prefers the session_index thread_name when present', () => {
   assert.equal(session.title, '修 API bug');
   assert.equal(session.cwd, 'C:\\work\\api');
   assert.equal(session.branch, 'master');
+  assert.equal(session.titleIsFallback, false, 'index thread_name 不應標記為退而標題');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -484,6 +487,20 @@ test('scanCodexFile falls back to file-scan title, then basename+timestamp, when
   const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
   assert.equal(session.title, '幫我加個功能');
   assert.equal(session.branch, null, 'empty git object has no branch');
+  assert.equal(session.titleIsFallback, false, 'extractCodexTitle 找到的真實標題不應標記為退而標題');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile falls back to basename+timestamp title when neither index nor file scan find a real title', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-w.jsonl');
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-3', cwd: 'C:\\work\\other-thing', git: {} } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>...' }] } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.ok(session.title.startsWith('other-thing ('), session.title);
+  assert.equal(session.titleIsFallback, true, '退回資料夾名+時間戳應標記為退而標題');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -750,6 +767,31 @@ test('buildHtml still clusters same-name multi-path groups inside one <details>,
   const bodyDiv = detailsEls[0].children.find((el) => el.tagName === 'DIV');
   const pathTexts = bodyDiv.children.filter((el) => el.className === 'group-path').map((el) => el.textContent);
   assert.deepEqual(pathTexts, ['D:\\proj', 'E:\\proj']);
+});
+
+test('buildHtml marks a titleIsFallback card with a distinct style, leaving a real title unmarked', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'real', title: '真實標題', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj', titleIsFallback: false,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+    {
+      tool: 'claude-code', id: 'fallback', title: 'proj (2026-08-01T00:00:00.000Z)', cwd: 'C:\\work\\proj', branch: null,
+      groupKey: 'c:/work/proj', displayName: 'proj', titleIsFallback: true,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEl = app.children.find((el) => el.tagName === 'DETAILS');
+  const bodyDiv = detailsEl.children.find((el) => el.tagName === 'DIV');
+  const cards = bodyDiv.children.filter((el) => el.className === 'card');
+  assert.equal(cards.length, 2);
+  const realCard = cards.find((c) => c.children[0].textContent.indexOf('真實標題') !== -1);
+  const fallbackCard = cards.find((c) => c.children[0].textContent.indexOf('proj (2026-08-01') !== -1);
+  assert.equal(fallbackCard.children[0].className, 'title-fallback', '退而標題應套用區隔樣式 class');
+  assert.notEqual(realCard.children[0].className, 'title-fallback', '真實標題不應套用退而標題樣式');
 });
 
 const { writeAtomic } = require('./session-dashboard.js');

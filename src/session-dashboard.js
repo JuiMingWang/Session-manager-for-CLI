@@ -227,13 +227,15 @@ function scanClaudeCodeFile(filePath, homeDir) {
   const { cwd, branch } = findClaudeCwdAndBranch(records);
   const effectiveCwd = cwd || homeDir;
   const stat = fs.statSync(filePath);
+  const extractedTitle = extractClaudeTitle(records);
+  const titleIsFallback = !extractedTitle;
   const title =
-    extractClaudeTitle(records) ||
-    `${displayNameForCwd(effectiveCwd)} (${stat.birthtime.toISOString()})`;
+    extractedTitle || `${displayNameForCwd(effectiveCwd)} (${stat.birthtime.toISOString()})`;
   return {
     tool: 'claude-code',
     id: path.basename(filePath, '.jsonl'),
     title,
+    titleIsFallback,
     cwd: effectiveCwd,
     branch,
     groupKey: normalizeGroupKey(effectiveCwd, homeDir),
@@ -332,14 +334,16 @@ function scanCodexFile(filePath, indexMap, homeDir) {
   const branch = payload.git && typeof payload.git.branch === 'string' ? payload.git.branch : null;
   const stat = fs.statSync(filePath);
 
-  let title = indexMap.has(id) ? indexMap.get(id) : null;
-  if (!title) title = extractCodexTitle(records);
-  if (!title) title = `${displayNameForCwd(cwd)} (${stat.birthtime.toISOString()})`;
+  const indexTitle = indexMap.has(id) ? indexMap.get(id) : null;
+  const extractedTitle = indexTitle || extractCodexTitle(records);
+  const titleIsFallback = !extractedTitle;
+  const title = extractedTitle || `${displayNameForCwd(cwd)} (${stat.birthtime.toISOString()})`;
 
   return {
     tool: 'codex',
     id,
     title,
+    titleIsFallback,
     cwd,
     branch,
     groupKey: normalizeGroupKey(cwd, homeDir),
@@ -417,6 +421,7 @@ function buildHtml(sessions, meta = {}) {
   summary.group-title { cursor: pointer; }
   .group-path { color: #888; font-size: 0.8rem; margin: 0.2rem 0 0.5rem; font-family: monospace; }
   .meta { color: #666; font-size: 0.85rem; }
+  .title-fallback { color: #888; font-style: italic; }
   button.copy-btn { cursor: pointer; margin-top: 0.4rem; }
   #controls > * { margin-right: 0.5rem; }
 </style>
@@ -483,6 +488,7 @@ function buildHtml(sessions, meta = {}) {
 
         var titleEl = document.createElement('div');
         titleEl.textContent = '[' + s.tool + '] ' + s.title;
+        if (s.titleIsFallback) titleEl.className = 'title-fallback';
         card.appendChild(titleEl);
 
         var metaEl = document.createElement('div');
