@@ -39,6 +39,7 @@ Session_Manager/
   docs/
     specs/2026-08-02-session-dashboard-design.md   (existing)
     plans/2026-08-02-session-dashboard-plan.md     (this file)
+    deploy-log.md                                  (created by Task 11 — dated record of each deploy)
 ```
 
 **Why source lives in the git repo but must also exist under `~/.claude/`:** `~/.claude` is not a git repo, but the spec fixes the script's *runtime* location at `~/.claude/scripts/session-dashboard.js` (hooks and the slash command both hard-reference that path). So this plan treats `src/` as the versioned source of truth, developed and unit-tested entirely inside the repo, and Task 11 copies the finished files to their real runtime locations as a deploy step — the same way you'd deploy a built artifact. `~/.claude/scripts/`, `~/.claude/commands/sessions.md`, and the two live hook config files are never edited directly during Tasks 1–10; all of that happens against repo-local files and fixtures.
@@ -115,11 +116,16 @@ test('displayNameForCwd returns the basename regardless of separator style', () 
   assert.equal(displayNameForCwd('C:/work/my-project/'), 'my-project');
 });
 
-test('buildResumeCommand produces PowerShell 5.1-safe syntax (no &&)', () => {
+test('buildResumeCommand produces PowerShell 5.1-safe syntax (no &&, single-quoted path)', () => {
   const claudeCmd = buildResumeCommand('claude-code', 'C:\\Users\\sjack\\proj', 'abc-123');
-  assert.equal(claudeCmd, 'Set-Location -LiteralPath "C:\\Users\\sjack\\proj"; claude --resume abc-123');
+  assert.equal(claudeCmd, "Set-Location -LiteralPath 'C:\\Users\\sjack\\proj'; claude --resume abc-123");
   const codexCmd = buildResumeCommand('codex', 'C:\\Users\\sjack\\proj', 'abc-123');
-  assert.equal(codexCmd, 'Set-Location -LiteralPath "C:\\Users\\sjack\\proj"; codex resume abc-123');
+  assert.equal(codexCmd, "Set-Location -LiteralPath 'C:\\Users\\sjack\\proj'; codex resume abc-123");
+});
+
+test('buildResumeCommand single-quotes the path so $ and backtick in a real folder name are never expanded by PowerShell, and escapes embedded single quotes', () => {
+  const cmd = buildResumeCommand('claude-code', "C:\\work\\$weird`path\\O'Brien", 'abc-123');
+  assert.equal(cmd, "Set-Location -LiteralPath 'C:\\work\\$weird`path\\O''Brien'; claude --resume abc-123");
 });
 
 test('parseArgs detects --quiet', () => {
@@ -127,6 +133,8 @@ test('parseArgs detects --quiet', () => {
   assert.deepEqual(parseArgs(['--quiet']), { quiet: true });
 });
 ```
+
+Note: `buildResumeCommand` uses a **single-quoted** PowerShell string (`'...'`), not double-quoted. PowerShell expands `$variables` and treats backtick as an escape character inside double-quoted strings — a real folder name containing either (both are legal Windows path characters) would silently corrupt a double-quoted command. Single-quoted strings in PowerShell never interpolate; the only character that needs escaping is a literal `'`, done by doubling it.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -176,9 +184,14 @@ function displayNameForCwd(cwd) {
   return parts.length ? parts[parts.length - 1] : String(cwd);
 }
 
+function escapePowerShellSingleQuoted(str) {
+  return String(str).replace(/'/g, "''");
+}
+
 function buildResumeCommand(tool, cwd, sessionId) {
   const cmd = tool === 'codex' ? 'codex resume' : 'claude --resume';
-  return `Set-Location -LiteralPath "${cwd}"; ${cmd} ${sessionId}`;
+  const safeCwd = escapePowerShellSingleQuoted(cwd);
+  return `Set-Location -LiteralPath '${safeCwd}'; ${cmd} ${sessionId}`;
 }
 
 function parseArgs(argv) {
@@ -191,6 +204,7 @@ module.exports = {
   normalizePath,
   normalizeGroupKey,
   displayNameForCwd,
+  escapePowerShellSingleQuoted,
   buildResumeCommand,
   parseArgs,
 };
@@ -199,7 +213,7 @@ module.exports = {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test src/session-dashboard.test.js`
-Expected: PASS — 9 tests passing.
+Expected: PASS — 10 tests passing.
 
 - [ ] **Step 5: Commit**
 
@@ -267,6 +281,14 @@ test('isSyntheticClaudeText flags known injected wrapper prefixes', () => {
   assert.equal(isSyntheticClaudeText('我想討論一下 session 管理器怎麼做'), false);
 });
 
+test('isSyntheticClaudeText flags <command-name> and <local-command-stdout/stderr> — confirmed against real transcripts, where some invocations lead with <command-name> instead of <command-message>', () => {
+  // Real example from this machine: '<command-name>/plugin</command-name>\n<command-message>plugin</command-message>\n<command-args>marketplace add ...'
+  assert.equal(isSyntheticClaudeText('<command-name>/plugin</command-name>\n<command-message>plugin</command-message>'), true);
+  // Real example: '<local-command-stdout>Successfully added marketplace: openai-codex</local-command-stdout>'
+  assert.equal(isSyntheticClaudeText('<local-command-stdout>Successfully added marketplace: openai-codex</local-command-stdout>'), true);
+  assert.equal(isSyntheticClaudeText('<local-command-stderr>some error output</local-command-stderr>'), true);
+});
+
 test('extractClaudeTitle skips isMeta records and synthetic-wrapped records, picks first genuine human text', () => {
   const records = [
     { type: 'user', isMeta: true, message: { content: '<local-command-caveat>Caveat: ...' } },
@@ -315,6 +337,25 @@ test('readFirstJsonLines stops at n records and skips blank lines', () => {
   assert.deepEqual(records.map((r) => r.n), [0, 1, 2]);
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
+
+test('readFirstJsonLines does not corrupt a multi-byte UTF-8 character straddling a 64KB chunk boundary', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'boundary.jsonl');
+  const CHUNK_SIZE = 64 * 1024;
+  const prefix = '{"type":"user","message":{"content":"';
+  const suffix = '中文測試"}}';
+  // Pad the line so the multi-byte suffix starts 2 bytes before the chunk boundary,
+  // guaranteeing the first character's 3-byte UTF-8 encoding is split across two reads.
+  const targetPrefixByteLength = CHUNK_SIZE - 2;
+  const filler = 'A'.repeat(Math.max(0, targetPrefixByteLength - Buffer.byteLength(prefix)));
+  fsForTests.writeFileSync(filePath, prefix + filler + suffix + '\n', 'utf8');
+
+  const records = readFirstJsonLines(filePath, 1);
+  assert.equal(records.length, 1);
+  assert.ok(records[0].message.content.endsWith('中文測試'), records[0].message.content.slice(-20));
+  assert.ok(!records[0].message.content.includes('�'), 'must not contain the UTF-8 replacement character');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -330,19 +371,53 @@ Add to `src/session-dashboard.js`, above `module.exports`:
 // ---------------------------------------------------------------------------
 // Shared jsonl reading
 // ---------------------------------------------------------------------------
+//
+// Reads only as many bytes as needed to gather the first `n` parseable lines
+// (bounded, chunked reads via a raw file descriptor), instead of loading the
+// whole file. Real Codex rollout files run to 10,000+ lines / several MB —
+// `fs.readFileSync` followed by `split('\n')` would defeat the spec's "cost
+// scales with file count, not file size" requirement.
+
+function pushIfParseable(records, rawLine) {
+  const trimmed = rawLine.trim();
+  if (!trimmed) return;
+  try {
+    records.push(JSON.parse(trimmed));
+  } catch (err) {
+    // Malformed/truncated line (e.g. file was mid-write) — skip it, keep scanning.
+  }
+}
 
 function readFirstJsonLines(filePath, n) {
-  const content = fs.readFileSync(filePath, 'utf8');
+  const CHUNK_SIZE = 64 * 1024;
+  const fd = fs.openSync(filePath, 'r');
   const records = [];
-  for (const line of content.split('\n')) {
-    if (records.length >= n) break;
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      records.push(JSON.parse(trimmed));
-    } catch (err) {
-      // Malformed/truncated line (e.g. file was mid-write) — skip it, keep scanning.
+  try {
+    // Accumulate raw bytes (a Buffer), not a string — a chunk boundary can land in the
+    // middle of a multi-byte UTF-8 character (e.g. Chinese text), and decoding each 64KB
+    // chunk to a string independently would silently corrupt that character into U+FFFD.
+    // '\n' is the single-byte ASCII 0x0A, which never appears inside a multi-byte UTF-8
+    // sequence, so it's always safe to split on — only call .toString('utf8') on a byte
+    // range that ends exactly at a '\n', i.e. a complete line.
+    let buffer = Buffer.alloc(0);
+    const chunk = Buffer.alloc(CHUNK_SIZE);
+    let bytesRead = 0;
+    do {
+      bytesRead = fs.readSync(fd, chunk, 0, CHUNK_SIZE, null);
+      if (bytesRead > 0) buffer = Buffer.concat([buffer, chunk.subarray(0, bytesRead)]);
+
+      let newlineIndex;
+      while (records.length < n && (newlineIndex = buffer.indexOf(0x0a)) !== -1) {
+        pushIfParseable(records, buffer.subarray(0, newlineIndex).toString('utf8'));
+        buffer = buffer.subarray(newlineIndex + 1);
+      }
+    } while (bytesRead > 0 && records.length < n);
+
+    if (records.length < n && buffer.length > 0) {
+      pushIfParseable(records, buffer.toString('utf8'));
     }
+  } finally {
+    fs.closeSync(fd);
   }
   return records;
 }
@@ -353,7 +428,10 @@ function readFirstJsonLines(filePath, n) {
 
 const CLAUDE_SYNTHETIC_PREFIXES = [
   '<command-message>',
+  '<command-name>',
   '<local-command-caveat>',
+  '<local-command-stdout>',
+  '<local-command-stderr>',
   '<system-reminder>',
   'Base directory for this skill:',
 ];
@@ -394,7 +472,7 @@ Update `module.exports` to also include `readFirstJsonLines, extractMessageText,
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test src/session-dashboard.test.js`
-Expected: PASS — 18 tests passing (9 from Task 1 + 9 new).
+Expected: PASS — 21 tests passing (10 from Task 1 + 11 new).
 
 - [ ] **Step 5: Commit**
 
@@ -484,20 +562,51 @@ test('scanClaudeCodeFile falls back to basename+timestamp title when no genuine 
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
-test('scanClaudeCode skips a broken file and counts it, still returns the good ones', () => {
+test('scanClaudeCodeFile throws when the file contains zero parseable JSON records', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'garbage.jsonl');
+  fsForTests.writeFileSync(filePath, 'this is not json at all\nneither is this line', 'utf8');
+  assert.throws(() => scanClaudeCodeFile(filePath, 'C:\\Users\\sjack'));
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCode skips a file with zero parseable JSON and counts it, still returns the good ones', () => {
   const dir = makeTempDir();
   writeJsonl(pathForTests.join(dir, 'projects', 'proj', 'good.jsonl'), [
     { type: 'user', cwd: 'C:\\work\\proj', message: { content: '正常的一則訊息' } },
   ]);
-  // A file that exists but will fail fs.statSync-independent parsing entirely is hard to construct;
-  // instead simulate the "unreadable file" edge case with a directory that has the .jsonl extension,
-  // which fails fs.readFileSync/fs.statSync in scanClaudeCodeFile and must be caught by scanClaudeCode.
-  fsForTests.mkdirSync(pathForTests.join(dir, 'projects', 'proj', 'broken.jsonl'));
+  fsForTests.writeFileSync(
+    pathForTests.join(dir, 'projects', 'proj', 'broken.jsonl'),
+    'not json at all\nstill not json',
+    'utf8'
+  );
 
   const { sessions, skipped } = scanClaudeCode(dir);
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].title, '正常的一則訊息');
   assert.equal(skipped, 1);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCode also counts files that fail for other I/O reasons, not just empty-parse (defense in depth)', () => {
+  const dir = makeTempDir();
+  const okPath = pathForTests.join(dir, 'projects', 'proj', 'ok.jsonl');
+  writeJsonl(okPath, [{ type: 'user', cwd: 'C:\\work\\proj', message: { content: '正常訊息' } }]);
+  const flakyPath = pathForTests.join(dir, 'projects', 'proj', 'flaky.jsonl');
+  writeJsonl(flakyPath, [{ type: 'user', cwd: 'C:\\work\\proj', message: { content: '正常訊息2' } }]);
+
+  const originalStatSync = fsForTests.statSync;
+  fsForTests.statSync = function (p, ...rest) {
+    if (p === flakyPath) throw new Error('simulated stat failure');
+    return originalStatSync.call(fsForTests, p, ...rest);
+  };
+  try {
+    const { sessions, skipped } = scanClaudeCode(dir);
+    assert.equal(sessions.length, 1);
+    assert.equal(skipped, 1);
+  } finally {
+    fsForTests.statSync = originalStatSync;
+  }
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -567,6 +676,9 @@ function findClaudeCwdAndBranch(records) {
 
 function scanClaudeCodeFile(filePath, homeDir) {
   const records = readFirstJsonLines(filePath, 20);
+  if (records.length === 0) {
+    throw new Error(`no parseable JSON records found in ${filePath}`);
+  }
   const { cwd, branch } = findClaudeCwdAndBranch(records);
   const effectiveCwd = cwd || homeDir;
   const stat = fs.statSync(filePath);
@@ -607,7 +719,7 @@ Update `module.exports` to also include `walkJsonlFiles, scanClaudeCodeFile, sca
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test src/session-dashboard.test.js`
-Expected: PASS — 24 tests passing.
+Expected: PASS — 29 tests passing.
 
 - [ ] **Step 5: Commit**
 
@@ -773,7 +885,7 @@ Update `module.exports` to also include `extractResponseItemText, isSyntheticCod
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test src/session-dashboard.test.js`
-Expected: PASS — 31 tests passing.
+Expected: PASS — 36 tests passing.
 
 - [ ] **Step 5: Commit**
 
@@ -843,6 +955,15 @@ test('scanCodexFile handles a missing session_meta record gracefully', () => {
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
+test('scanCodexFile throws when the file contains zero parseable JSON records', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'garbage.jsonl');
+  fsForTests.mkdirSync(pathForTests.dirname(filePath), { recursive: true });
+  fsForTests.writeFileSync(filePath, 'not json\nstill not json', 'utf8');
+  assert.throws(() => scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack'));
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
 test('scanCodex reads both sessions/ (nested) and archived_sessions/ (flat), dedupes via index once', () => {
   const dir = makeTempDir();
   writeJsonl(pathForTests.join(dir, 'sessions', '2026', '07', '10', 'rollout-a.jsonl'), [
@@ -871,6 +992,20 @@ test('scanCodex returns empty result without throwing when ~/.codex does not exi
   assert.equal(skipped, 0);
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
+
+test('scanCodex skips a file with zero parseable JSON and counts it, still returns the good ones', () => {
+  const dir = makeTempDir();
+  writeJsonl(pathForTests.join(dir, 'sessions', 'good.jsonl'), [
+    { type: 'session_meta', payload: { id: 'g1', cwd: 'C:\\work\\proj' } },
+  ]);
+  fsForTests.writeFileSync(pathForTests.join(dir, 'sessions', 'broken.jsonl'), 'not json\nstill not json', 'utf8');
+
+  const { sessions, skipped } = scanCodex(dir);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].id, 'g1');
+  assert.equal(skipped, 1);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -889,6 +1024,9 @@ Add to `src/session-dashboard.js`, above `module.exports`:
 
 function scanCodexFile(filePath, indexMap, homeDir) {
   const records = readFirstJsonLines(filePath, 20);
+  if (records.length === 0) {
+    throw new Error(`no parseable JSON records found in ${filePath}`);
+  }
   const metaRecord = records.find((r) => r.type === 'session_meta');
   const payload = (metaRecord && metaRecord.payload) || {};
   const id = payload.id || path.basename(filePath, '.jsonl');
@@ -938,7 +1076,7 @@ Update `module.exports` to also include `scanCodexFile, scanCodex`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test src/session-dashboard.test.js`
-Expected: PASS — 36 tests passing.
+Expected: PASS — 43 tests passing.
 
 - [ ] **Step 5: Commit**
 
@@ -1131,7 +1269,10 @@ function buildHtml(sessions, meta = {}) {
           btn.className = 'copy-btn';
           btn.textContent = '複製續接指令';
           btn.addEventListener('click', function () {
-            var cmd = 'Set-Location -LiteralPath "' + s.cwd + '"; ' + (s.tool === 'codex' ? 'codex resume' : 'claude --resume') + ' ' + s.id;
+            // Single-quoted PowerShell string, matching buildResumeCommand's escaping in session-dashboard.js:
+            // double-quoted strings would let a real folder name containing $ or a backtick corrupt the command.
+            var safeCwd = String(s.cwd).replace(/'/g, "''");
+            var cmd = "Set-Location -LiteralPath '" + safeCwd + "'; " + (s.tool === 'codex' ? 'codex resume' : 'claude --resume') + ' ' + s.id;
             navigator.clipboard.writeText(cmd);
           });
           card.appendChild(btn);
@@ -1158,7 +1299,7 @@ Update `module.exports` to also include `buildHtml`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test src/session-dashboard.test.js`
-Expected: PASS — 40 tests passing.
+Expected: PASS — 47 tests passing.
 
 - [ ] **Step 5: Commit**
 
@@ -1242,7 +1383,7 @@ Update `module.exports` to also include `writeAtomic`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test src/session-dashboard.test.js`
-Expected: PASS — 43 tests passing.
+Expected: PASS — 50 tests passing.
 
 - [ ] **Step 5: Commit**
 
@@ -1370,7 +1511,7 @@ Update `module.exports` to also include `main`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `node --test src/session-dashboard.test.js`
-Expected: PASS — 45 tests passing.
+Expected: PASS — 52 tests passing.
 
 - [ ] **Step 5: Commit**
 
@@ -1423,6 +1564,7 @@ git commit -m "新增 /sessions 斜線指令定義"
 - Test: `src/install-session-dashboard-hooks.test.js`
 
 **Interfaces:**
+- Consumes: `writeAtomic(targetPath: string, content: string): void` (Task 7, imported from `./session-dashboard.js` — installing a hook writes a live, shared config file, so it gets the same atomic temp-file+rename safety as the dashboard output).
 - Produces: `addSessionStartHookEntry(hooksConfig: object, newEntry: object): { config: object, changed: boolean }`, `backupFile(filePath: string): string`, `installIntoFile(filePath: string, newEntry: object): { changed: boolean, backupPath: string|null }`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1538,6 +1680,7 @@ Create `src/install-session-dashboard-hooks.js`:
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { writeAtomic } = require('./session-dashboard.js');
 
 const MARKER = 'session-dashboard.js';
 
@@ -1576,7 +1719,7 @@ function installIntoFile(filePath, newEntry) {
   if (!changed) return { changed: false, backupPath: null };
 
   const backupPath = backupFile(filePath);
-  fs.writeFileSync(filePath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  writeAtomic(filePath, JSON.stringify(config, null, 2) + '\n');
   return { changed: true, backupPath };
 }
 
@@ -1650,7 +1793,7 @@ git commit -m "新增 SessionStart hook 安裝器（新增式、備份、可重�
 - [ ] **Step 1: Run the full test suite once more before touching anything real**
 
 Run: `node --test src/`
-Expected: PASS — all tests from Tasks 1–10 (52 total) still passing.
+Expected: PASS — 59 tests total (52 in `src/session-dashboard.test.js` from Tasks 1–8, plus 7 in `src/install-session-dashboard-hooks.test.js` from Task 10).
 
 - [ ] **Step 2: Copy the script and slash command into place**
 
@@ -1684,15 +1827,24 @@ Run the `/sessions` slash command (or directly `node ~/.claude/scripts/session-d
 - The browser opens `~/.claude/sessions-dashboard.html`.
 - Sessions from both Claude Code and Codex appear, grouped by project.
 - A project with a Chinese-character folder name (e.g. 「經營模擬遊戲」) shows a readable Chinese display name, not an encoded folder name.
-- Clicking "複製續接指令" on a card copies a `Set-Location -LiteralPath "..."; claude --resume <id>` (or `codex resume <id>`) string; pasting it into a fresh PowerShell 5.1 window and running it lands in the right directory and resumes the right session.
+- Clicking "複製續接指令" on a card copies a `Set-Location -LiteralPath '...'; claude --resume <id>` (or `codex resume <id>`) string (single-quoted); pasting it into a fresh PowerShell 5.1 window and running it lands in the right directory and resumes the right session.
+- Specifically test one session whose `cwd` contains a `$` or a space (e.g. create a throwaway folder like `C:\Users\sjack\Documents\$test folder` and start a one-line Claude Code session in it, or reuse an existing path with a space) — copy its resume command and confirm `Set-Location` lands in the correct directory rather than silently expanding `$test` as an empty PowerShell variable. This exercises the single-quote escaping fix from the round-1 review, which only the manual step covers (front-end JS isn't unit-tested per the spec's own test plan).
 
-- [ ] **Step 6: Commit the deploy**
+- [ ] **Step 6: Record the deploy in the repo**
 
-The copied files under `~/.claude/` are outside this git repo and are not committed (that directory isn't a repo). Commit only the repo-side confirmation that deploy happened:
+The copied files under `~/.claude/` are outside this git repo (that directory isn't a repo), so there is nothing to `git add` from the copy step itself — append a dated deploy record instead of running an empty `git commit`:
 
 ```bash
-git add -A
-git commit -m "完成部署：腳本與指令已複製到 ~/.claude，SessionStart hook 已安裝"
+mkdir -p docs
+cat >> docs/deploy-log.md <<EOF
+
+## $(date -u +%Y-%m-%dT%H:%M:%SZ)
+- Deployed session-dashboard.js and sessions.md to ~/.claude/
+- Ran install-session-dashboard-hooks.js — appended SessionStart hooks to ~/.claude/settings.json and ~/.codex/hooks.json (existing pet-companion / Clawd on Desk entries preserved)
+- Verified /sessions opens the dashboard with sessions from both tools, including a $-in-path resume command
+EOF
+git add docs/deploy-log.md
+git commit -m "記錄 Session 管理器部署完成"
 ```
 
 ---
@@ -1703,4 +1855,10 @@ git commit -m "完成部署：腳本與指令已複製到 ~/.claude，SessionSta
 
 **Placeholder scan:** 無 TBD/TODO；每個 step 都含完整可執行程式碼。
 
-**Type consistency：** `SessionRecord` 形狀（`tool/id/title/cwd/branch/groupKey/displayName/startedAt/lastActiveAt`）在 Task 3、5、6、8 全程一致；`scanClaudeCode`/`scanCodex` 都回傳 `{sessions, skipped}`；`buildResumeCommand`、卡片按鈕內的續接指令組字串（Task 6）與 Task 1 的 `buildResumeCommand` 邏輯保持同一份 PowerShell 語法（`Set-Location -LiteralPath "..."; <cmd>`），未出現兩套不同格式。
+**Type consistency：** `SessionRecord` 形狀（`tool/id/title/cwd/branch/groupKey/displayName/startedAt/lastActiveAt`）在 Task 3、5、6、8 全程一致；`scanClaudeCode`/`scanCodex` 都回傳 `{sessions, skipped}`；`buildResumeCommand`（Task 1）與卡片按鈕內重複實作的瀏覽器端組字串（Task 6）採同一種單引號 PowerShell 語法與同一種跳脫規則（`'` 加倍），未出現兩套不同格式——瀏覽器端無法 `require()` Node 模組，所以這段邏輯無法真的去重，僅能保持手動同步，已在程式碼註解中標明。
+
+**Post-round-1-review fixes (codex-peer-review):** 修正了 7 個問題中的 6 個——`readFirstJsonLines` 改成有界的分塊讀取（不再整檔載入）、Claude 標題過濾清單補上 `<command-name>`/`<local-command-stdout>`/`<local-command-stderr>`（皆已對照本機真實 transcript 驗證存在）、`scanClaudeCodeFile`/`scanCodexFile` 在零筆可解析記錄時改為 throw（讓 `skipped` 計數正確反映全毀檔案）、Task 3 原本用資料夾偽裝 `.jsonl` 的壞檔測試（`walkJsonlFiles` 的 `isFile()` 檢查會直接濾掉目錄，測試永遠不會觸發被測邏輯）換成真正會讓程式碼路徑執行到的壞檔內容、續接指令改用單引號 PowerShell 字串並跳脫內嵌單引號（避免路徑中的 `$`／反引號被誤判為變數展開）、Task 10 的 hook 安裝也採用已有的 `writeAtomic`、Task 11 移除了一個必然失敗的空 `git commit` 步驟改為寫部署紀錄。對 Codex fallback 標題掃描深度（第 4 個問題）採取推翻——理由記錄在下方 codex-peer-review 對話與文件開頭的「Real-data finding」段落，codex 第二輪已 CONCEDE。
+
+**Round 2 額外發現並修正：** 分塊讀取以 buffer 而非字串累積，只在確定切到完整行（即遇到單一位元組的 `\n`）時才呼叫一次 `.toString('utf8')`，避免中文等多位元組字元剛好卡在 64KB 邊界被拆成亂碼（`�`）；新增針對此邊界情況的專門測試。也修正了先前殘留、寫死沒跟著更新的測試總數。
+
+<!-- codex-peer-reviewed: 2026-08-02T02:55:47Z rounds=3 verdict=approved -->
