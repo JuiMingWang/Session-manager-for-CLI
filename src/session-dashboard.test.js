@@ -698,21 +698,22 @@ function makeFakeElement(tag) {
     value: '',
     open: false,
     children: [],
-    _clickHandlers: [],
+    _handlers: {},
     appendChild(child) { this.children.push(child); return child; },
-    addEventListener(type, fn) { if (type === 'click') this._clickHandlers.push(fn); },
-    click() { this._clickHandlers.forEach((fn) => fn()); },
+    addEventListener(type, fn) { (this._handlers[type] = this._handlers[type] || []).push(fn); },
+    dispatchEvent(type) { (this._handlers[type] || []).forEach((fn) => fn()); },
+    click() { this.dispatchEvent('click'); },
   };
 }
 
 function runDashboardScript(html, controlValues = {}) {
   const defaults = {
     search: '', 'category-filter': 'all', 'tool-filter': 'all', 'range-filter': '30',
-    'generated-meta': '', 'skipped-warning': '', app: '',
+    'generated-meta': '', 'skipped-warning': '', app: '', 'quick-resume': '',
   };
   const elementsById = {};
   for (const [id, defaultValue] of Object.entries(defaults)) {
-    const el = makeFakeElement(id === 'app' ? 'div' : 'input');
+    const el = makeFakeElement(id === 'app' ? 'div' : (id === 'quick-resume' ? 'div' : 'input'));
     el.value = controlValues[id] !== undefined ? controlValues[id] : defaultValue;
     elementsById[id] = el;
   }
@@ -732,7 +733,7 @@ function runDashboardScript(html, controlValues = {}) {
   const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
   if (!scriptMatch) throw new Error('embedded <script> not found in buildHtml output');
   vm.runInContext(scriptMatch[1], sandbox);
-  return { app: elementsById.app };
+  return { app: elementsById.app, elementsById };
 }
 
 // Ticket 06 nests cards inside project node -> (optional path sub-node) -> time-bucket
@@ -1086,6 +1087,138 @@ test('連續快速點擊複製按鈕不會讓文字卡住，也不會被舊計�
   assert.equal(btn.textContent, '已複製✓', '第一次點擊的計時器應已被第二次點擊清除，不應提前恢復');
   await new Promise((resolve) => setTimeout(resolve, 700));
   assert.equal(btn.textContent, '複製續接指令', '第二次點擊的計時器應正常觸發恢復，不會卡住');
+});
+
+// Ticket 07 — 接續快速區：獨立於 render()/篩選狀態的頂部固定區塊（ADR-0001）。
+function makeQuickResumeSessions() {
+  const base = new Date('2026-08-02T12:00:00.000Z').getTime();
+  const sessions = [];
+  for (let i = 0; i < 10; i++) {
+    const t = new Date(base - i * 3600000).toISOString();
+    sessions.push({
+      tool: i % 2 === 0 ? 'claude-code' : 'codex', id: 'qr-' + i, title: '標題' + i,
+      cwd: 'C:\\work\\proj' + i, branch: 'main',
+      groupKey: 'c:/work/proj' + i, displayName: 'proj' + i, pathExists: true,
+      startedAt: t, lastActiveAt: t,
+    });
+  }
+  // 兩筆路徑已失效，時間比其他所有 session 都新，驗證挑選規則確實排除它們，而非只挑最新的 8 筆
+  for (let i = 0; i < 2; i++) {
+    const t = new Date(base + (i + 1) * 3600000).toISOString();
+    sessions.push({
+      tool: 'claude-code', id: 'gone-' + i, title: '已失效' + i,
+      cwd: 'C:\\work\\gone' + i, branch: null,
+      groupKey: 'c:/work/gone' + i, displayName: 'gone' + i, pathExists: false,
+      startedAt: t, lastActiveAt: t,
+    });
+  }
+  return sessions;
+}
+
+function findQuickResumeCards(elementsById) {
+  return elementsById['quick-resume'].children.filter((el) => (el.className || '').split(' ').indexOf('card') !== -1);
+}
+
+test('buildHtml — 接續快速區固定顯示全站最新 8 筆，排除 pathExists:false，即使那些失效路徑的 session 時間更新', () => {
+  const sessions = makeQuickResumeSessions();
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T12:00:00.000Z', skippedCount: 0 });
+  const { elementsById } = runDashboardScript(html, { 'range-filter': 'all' });
+  const cards = findQuickResumeCards(elementsById);
+  assert.equal(cards.length, 8, '接續快速區必須固定顯示 8 筆');
+  cards.forEach((card) => {
+    assert.equal(
+      card.children.some((el) => el.textContent.indexOf('已失效') !== -1),
+      false,
+      '失效路徑的 session 不應出現在接續快速區'
+    );
+  });
+  assert.ok(cards[0].children[0].textContent.indexOf('proj0') !== -1, '第一筆應是未失效者中最新的 session');
+});
+
+test('buildHtml — 接續快速區在合格 session 不足 8 筆時，顯示全部合格筆數而非硬湊 8 筆', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 's1', title: 't1', cwd: 'C:\\work\\p1', branch: null,
+      groupKey: 'c:/work/p1', displayName: 'p1', pathExists: true,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+    {
+      tool: 'claude-code', id: 's2', title: 't2', cwd: 'C:\\work\\p2', branch: null,
+      groupKey: 'c:/work/p2', displayName: 'p2', pathExists: false,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-02T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T00:00:00.000Z', skippedCount: 0 });
+  const { elementsById } = runDashboardScript(html, { 'range-filter': 'all' });
+  const cards = findQuickResumeCards(elementsById);
+  assert.equal(cards.length, 1, '只有 1 筆合格 session 時，接續快速區應只顯示 1 筆');
+});
+
+test('buildHtml — 接續快速區卡片為精簡型：只有專案名稱/標題/最後互動時間/接續按鈕，不含 branch、開始時間、完整 cwd', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'qr-solo', title: '精簡卡片標題', cwd: 'C:\\work\\solo-project', branch: 'feature/foo',
+      groupKey: 'c:/work/solo-project', displayName: 'solo-project', pathExists: true,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-02T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T00:00:00.000Z', skippedCount: 0 });
+  const { elementsById } = runDashboardScript(html, { 'range-filter': 'all' });
+  const cards = findQuickResumeCards(elementsById);
+  assert.equal(cards.length, 1);
+  const cardText = cards[0].children.map((el) => el.textContent).join('\n');
+  assert.ok(cardText.indexOf('solo-project') !== -1, '應顯示 displayName');
+  assert.ok(cardText.indexOf('精簡卡片標題') !== -1, '應顯示標題');
+  assert.ok(cardText.indexOf('2026-08-02T00:00:00.000Z') !== -1, '應顯示 lastActiveAt');
+  assert.equal(cardText.indexOf('feature/foo'), -1, '不應顯示 branch');
+  assert.equal(cardText.indexOf('2026-08-01T00:00:00.000Z'), -1, '不應顯示 startedAt');
+  assert.equal(cardText.indexOf('C:\\work\\solo-project'), -1, '不應顯示完整 cwd');
+  assert.ok(cards[0].children.some((el) => el.tagName === 'BUTTON'), '應包含接續按鈕');
+});
+
+function snapshotElement(el) {
+  return {
+    tagName: el.tagName,
+    className: el.className,
+    textContent: el.textContent,
+    children: (el.children || []).map(snapshotElement),
+  };
+}
+
+test('buildHtml — 接續快速區完全不受搜尋框、分類、工具、時間範圍篩選狀態影響，內容維持不變', () => {
+  const sessions = makeQuickResumeSessions();
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T12:00:00.000Z', skippedCount: 0 });
+  const { elementsById } = runDashboardScript(html, { 'range-filter': 'all' });
+  const before = JSON.stringify(snapshotElement(elementsById['quick-resume']));
+
+  elementsById.search.value = 'proj0';
+  elementsById.search.dispatchEvent('input');
+  elementsById['category-filter'].value = 'misc';
+  elementsById['category-filter'].dispatchEvent('change');
+  elementsById['tool-filter'].value = 'codex';
+  elementsById['tool-filter'].dispatchEvent('change');
+  elementsById['range-filter'].value = '7';
+  elementsById['range-filter'].dispatchEvent('change');
+
+  const after = JSON.stringify(snapshotElement(elementsById['quick-resume']));
+  assert.equal(after, before, '接續快速區內容在篩選狀態變動後必須維持完全不變');
+});
+
+test('buildHtml — 接續快速區接續按鈕的複製行為與專案樹卡片一致（點擊後顯示「已複製✓」）', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'qr-copy', title: '複製測試', cwd: 'C:\\work\\copy-test', branch: null,
+      groupKey: 'c:/work/copy-test', displayName: 'copy-test', pathExists: true,
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-02T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T00:00:00.000Z', skippedCount: 0 });
+  const { elementsById } = runDashboardScript(html, { 'range-filter': 'all' });
+  const cards = findQuickResumeCards(elementsById);
+  const btn = cards[0].children.find((el) => el.tagName === 'BUTTON');
+  assert.equal(btn.textContent, '複製續接指令');
+  btn.click();
+  assert.equal(btn.textContent, '已複製✓');
 });
 
 const { writeAtomic } = require('./session-dashboard.js');

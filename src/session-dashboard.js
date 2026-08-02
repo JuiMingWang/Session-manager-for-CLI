@@ -460,6 +460,8 @@ function buildHtml(sessions, meta = {}) {
 <h1>Session 管理器</h1>
 <div class="meta" id="generated-meta"></div>
 <div id="skipped-warning" class="meta"></div>
+<h2>接續快速區</h2>
+<div id="quick-resume"></div>
 <div id="controls">
   <input id="search" placeholder="搜尋標題/路徑">
   <select id="category-filter">
@@ -489,6 +491,51 @@ function buildHtml(sessions, meta = {}) {
     }
 
     function normalize(str) { return (str || '').toLowerCase(); }
+
+    var COPY_BTN_LABEL = '複製續接指令';
+    function buildResumeCmd(s) {
+      // Single-quoted PowerShell string, matching buildResumeCommand's escaping in session-dashboard.js:
+      // double-quoted strings would let a real folder name containing $ or a backtick corrupt the command.
+      var safeCwd = String(s.cwd).replace(/'/g, "''");
+      return "Set-Location -LiteralPath '" + safeCwd + "'; " + (s.tool === 'codex' ? 'codex resume' : 'claude --resume') + ' ' + s.id;
+    }
+
+    function createCopyButton(s) {
+      var btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.textContent = COPY_BTN_LABEL;
+      var copyResetTimer = null;
+      btn.addEventListener('click', function () {
+        navigator.clipboard.writeText(buildResumeCmd(s));
+        btn.textContent = '已複製✓';
+        if (copyResetTimer) clearTimeout(copyResetTimer);
+        copyResetTimer = setTimeout(function () {
+          btn.textContent = COPY_BTN_LABEL;
+          copyResetTimer = null;
+        }, 1500);
+      });
+      return btn;
+    }
+
+    var QUICK_RESUME_COUNT = 8;
+    function renderQuickResume() {
+      var container = document.getElementById('quick-resume');
+      var candidates = DATA.sessions.filter(function (s) { return s.pathExists !== false; });
+      candidates.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
+      candidates.slice(0, QUICK_RESUME_COUNT).forEach(function (s) {
+        var card = document.createElement('div');
+        card.className = 'card';
+        var titleEl = document.createElement('div');
+        titleEl.textContent = s.displayName + '：' + s.title;
+        card.appendChild(titleEl);
+        var metaEl = document.createElement('div');
+        metaEl.className = 'meta';
+        metaEl.textContent = '最後互動：' + s.lastActiveAt;
+        card.appendChild(metaEl);
+        card.appendChild(createCopyButton(s));
+        container.appendChild(card);
+      });
+    }
 
     function render() {
       var app = document.getElementById('app');
@@ -536,25 +583,7 @@ function buildHtml(sessions, meta = {}) {
         metaEl.textContent = '最後互動：' + s.lastActiveAt + '　開始：' + s.startedAt + (s.branch ? '　branch：' + s.branch : '');
         card.appendChild(metaEl);
 
-        var btn = document.createElement('button');
-        btn.className = 'copy-btn';
-        var COPY_BTN_LABEL = '複製續接指令';
-        btn.textContent = COPY_BTN_LABEL;
-        var copyResetTimer = null;
-        btn.addEventListener('click', function () {
-          // Single-quoted PowerShell string, matching buildResumeCommand's escaping in session-dashboard.js:
-          // double-quoted strings would let a real folder name containing $ or a backtick corrupt the command.
-          var safeCwd = String(s.cwd).replace(/'/g, "''");
-          var cmd = "Set-Location -LiteralPath '" + safeCwd + "'; " + (s.tool === 'codex' ? 'codex resume' : 'claude --resume') + ' ' + s.id;
-          navigator.clipboard.writeText(cmd);
-          btn.textContent = '已複製✓';
-          if (copyResetTimer) clearTimeout(copyResetTimer);
-          copyResetTimer = setTimeout(function () {
-            btn.textContent = COPY_BTN_LABEL;
-            copyResetTimer = null;
-          }, 1500);
-        });
-        card.appendChild(btn);
+        card.appendChild(createCopyButton(s));
 
         container.appendChild(card);
       }
@@ -681,6 +710,8 @@ function buildHtml(sessions, meta = {}) {
     document.getElementById('category-filter').addEventListener('change', render);
     document.getElementById('tool-filter').addEventListener('change', render);
     document.getElementById('range-filter').addEventListener('change', render);
+    // ADR-0001: 接續快速區刻意獨立於 render()／篩選狀態，只在載入時渲染一次，不要接上任何篩選事件。
+    renderQuickResume();
     render();
   })();
 </script>
