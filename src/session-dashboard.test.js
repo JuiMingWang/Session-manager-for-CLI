@@ -186,3 +186,121 @@ test('readFirstJsonLines does not corrupt a multi-byte UTF-8 character straddlin
   assert.ok(!records[0].message.content.includes('�'), 'must not contain the UTF-8 replacement character');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
+
+const { walkJsonlFiles, scanClaudeCodeFile, scanClaudeCode } = require('./session-dashboard.js');
+
+function writeJsonl(filePath, records) {
+  fsForTests.mkdirSync(pathForTests.dirname(filePath), { recursive: true });
+  fsForTests.writeFileSync(filePath, records.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+}
+
+test('walkJsonlFiles finds .jsonl files recursively and excludes named directories', () => {
+  const dir = makeTempDir();
+  writeJsonl(pathForTests.join(dir, 'proj1', 'a.jsonl'), [{ n: 1 }]);
+  writeJsonl(pathForTests.join(dir, 'proj1', 'subagents', 'b.jsonl'), [{ n: 2 }]);
+  writeJsonl(pathForTests.join(dir, 'proj2', 'c.jsonl'), [{ n: 3 }]);
+  fsForTests.writeFileSync(pathForTests.join(dir, 'proj2', 'notes.txt'), 'ignore me');
+
+  const files = walkJsonlFiles(dir, ['subagents']).map((f) => pathForTests.basename(f)).sort();
+  assert.deepEqual(files, ['a.jsonl', 'c.jsonl']);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('walkJsonlFiles returns empty array for a missing root directory', () => {
+  assert.deepEqual(walkJsonlFiles('C:\\does\\not\\exist\\at\\all', []), []);
+});
+
+test('scanClaudeCodeFile extracts title, cwd, branch, group key from a real-shaped file', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'abc-123.jsonl');
+  writeJsonl(filePath, [
+    { type: 'mode', mode: 'default' },
+    {
+      type: 'user',
+      cwd: 'C:\\work\\my-project',
+      gitBranch: 'main',
+      message: { content: '我想討論一下 session 管理器怎麼做' },
+    },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.equal(session.tool, 'claude-code');
+  assert.equal(session.id, 'abc-123');
+  assert.equal(session.title, '我想討論一下 session 管理器怎麼做');
+  assert.equal(session.cwd, 'C:\\work\\my-project');
+  assert.equal(session.branch, 'main');
+  assert.equal(session.displayName, 'my-project');
+  assert.equal(session.groupKey, normalizeGroupKeyForTest());
+
+  function normalizeGroupKeyForTest() {
+    const { normalizeGroupKey: fn } = require('./session-dashboard.js');
+    return fn('C:\\work\\my-project', 'C:\\Users\\sjack');
+  }
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCodeFile falls back to basename+timestamp title when no genuine text found', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'def-456.jsonl');
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\other-project', isMeta: true, message: { content: '<local-command-caveat>...' } },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.ok(session.title.startsWith('other-project ('), session.title);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCodeFile throws when the file contains zero parseable JSON records', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'garbage.jsonl');
+  fsForTests.writeFileSync(filePath, 'this is not json at all\nneither is this line', 'utf8');
+  assert.throws(() => scanClaudeCodeFile(filePath, 'C:\\Users\\sjack'));
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCode skips a file with zero parseable JSON and counts it, still returns the good ones', () => {
+  const dir = makeTempDir();
+  writeJsonl(pathForTests.join(dir, 'projects', 'proj', 'good.jsonl'), [
+    { type: 'user', cwd: 'C:\\work\\proj', message: { content: '正常的一則訊息' } },
+  ]);
+  fsForTests.writeFileSync(
+    pathForTests.join(dir, 'projects', 'proj', 'broken.jsonl'),
+    'not json at all\nstill not json',
+    'utf8'
+  );
+
+  const { sessions, skipped } = scanClaudeCode(dir);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].title, '正常的一則訊息');
+  assert.equal(skipped, 1);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCode also counts files that fail for other I/O reasons, not just empty-parse (defense in depth)', () => {
+  const dir = makeTempDir();
+  const okPath = pathForTests.join(dir, 'projects', 'proj', 'ok.jsonl');
+  writeJsonl(okPath, [{ type: 'user', cwd: 'C:\\work\\proj', message: { content: '正常訊息' } }]);
+  const flakyPath = pathForTests.join(dir, 'projects', 'proj', 'flaky.jsonl');
+  writeJsonl(flakyPath, [{ type: 'user', cwd: 'C:\\work\\proj', message: { content: '正常訊息2' } }]);
+
+  const originalStatSync = fsForTests.statSync;
+  fsForTests.statSync = function (p, ...rest) {
+    if (p === flakyPath) throw new Error('simulated stat failure');
+    return originalStatSync.call(fsForTests, p, ...rest);
+  };
+  try {
+    const { sessions, skipped } = scanClaudeCode(dir);
+    assert.equal(sessions.length, 1);
+    assert.equal(skipped, 1);
+  } finally {
+    fsForTests.statSync = originalStatSync;
+  }
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCode returns empty result when the projects directory does not exist', () => {
+  const dir = makeTempDir();
+  const { sessions, skipped } = scanClaudeCode(dir);
+  assert.deepEqual(sessions, []);
+  assert.equal(skipped, 0);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});

@@ -148,6 +148,90 @@ function extractClaudeTitle(records, maxScan = 20) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Directory walking
+// ---------------------------------------------------------------------------
+
+function walkJsonlFiles(rootDir, excludeDirNames = []) {
+  const results = [];
+  if (!fs.existsSync(rootDir)) return results;
+  const stack = [rootDir];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (err) {
+      continue;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (excludeDirNames.includes(entry.name)) continue;
+        stack.push(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        results.push(fullPath);
+      }
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code adapter
+// ---------------------------------------------------------------------------
+
+function findClaudeCwdAndBranch(records) {
+  for (const record of records) {
+    if (typeof record.cwd === 'string') {
+      return {
+        cwd: record.cwd,
+        branch: typeof record.gitBranch === 'string' ? record.gitBranch : null,
+      };
+    }
+  }
+  return { cwd: null, branch: null };
+}
+
+function scanClaudeCodeFile(filePath, homeDir) {
+  const records = readFirstJsonLines(filePath, 20);
+  if (records.length === 0) {
+    throw new Error(`no parseable JSON records found in ${filePath}`);
+  }
+  const { cwd, branch } = findClaudeCwdAndBranch(records);
+  const effectiveCwd = cwd || homeDir;
+  const stat = fs.statSync(filePath);
+  const title =
+    extractClaudeTitle(records) ||
+    `${displayNameForCwd(effectiveCwd)} (${stat.birthtime.toISOString()})`;
+  return {
+    tool: 'claude-code',
+    id: path.basename(filePath, '.jsonl'),
+    title,
+    cwd: effectiveCwd,
+    branch,
+    groupKey: normalizeGroupKey(effectiveCwd, homeDir),
+    displayName: displayNameForCwd(effectiveCwd),
+    startedAt: stat.birthtime.toISOString(),
+    lastActiveAt: stat.mtime.toISOString(),
+  };
+}
+
+function scanClaudeCode(claudeHomeDir) {
+  const projectsDir = path.join(claudeHomeDir, 'projects');
+  const files = walkJsonlFiles(projectsDir, ['subagents']);
+  const sessions = [];
+  let skipped = 0;
+  for (const file of files) {
+    try {
+      sessions.push(scanClaudeCodeFile(file, claudeHomeDir));
+    } catch (err) {
+      skipped += 1;
+    }
+  }
+  return { sessions, skipped };
+}
+
 module.exports = {
   escapeHtml,
   embedJsonSafely,
@@ -161,4 +245,7 @@ module.exports = {
   extractMessageText,
   isSyntheticClaudeText,
   extractClaudeTitle,
+  walkJsonlFiles,
+  scanClaudeCodeFile,
+  scanClaudeCode,
 };
