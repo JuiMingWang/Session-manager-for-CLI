@@ -666,6 +666,11 @@ test('buildHtml defaults generatedAt/skippedCount when meta is omitted', () => {
   assert.ok(/"generatedAt":"\d{4}-\d{2}-\d{2}T/.test(html));
 });
 
+test('buildHtml includes a prefers-color-scheme: dark media query', () => {
+  const html = buildHtml([]);
+  assert.ok(html.includes('@media (prefers-color-scheme: dark)'));
+});
+
 test('buildHtml embeds every session field needed by the front end', () => {
   const sessions = [
     {

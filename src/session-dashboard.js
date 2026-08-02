@@ -433,6 +433,19 @@ function buildHtml(sessions, meta = {}) {
   .tool-badge-codex { background: #2563eb; }
   button.copy-btn { cursor: pointer; margin-top: 0.4rem; }
   #controls > * { margin-right: 0.5rem; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a1a; color: #ddd; }
+    .card { border-color: #444; }
+    .group-path { color: #999; }
+    .meta { color: #aaa; }
+    .title-fallback { color: #999; }
+    .path-missing-warning { color: #f87171; }
+    .tool-badge { border-color: rgba(255, 255, 255, 0.3); }
+    .tool-badge-claude-code { background: #f59e0b; }
+    .tool-badge-codex { background: #60a5fa; }
+    button.copy-btn { background: #2a2a2a; color: #ddd; border-color: #555; }
+    #controls input, #controls select { background: #2a2a2a; color: #ddd; border-color: #555; }
+  }
 </style>
 </head>
 <body>

@@ -56,3 +56,10 @@
 - 測試數：84 → 87（全部通過，無既有測試被破壞）。
 - 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。
 - 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項，含確認剪貼簿內容正確）——本次同樣維持 `--quiet` 不開瀏覽器操作真實資料，按鈕文字即時變化與計時器行為已透過 `node:vm` 執行內嵌前端 script 並用真實 `setTimeout` 驗證（非僅字串斷言），但實際瀏覽器中的視覺呈現與剪貼簿寫入結果留待使用者或下次工作階段人工確認。
+
+## 2026-08-02T15:46:49Z
+- 實作 ticket 05（深色模式）：在既有內嵌 `<style>` 區塊內新增一段 `@media (prefers-color-scheme: dark)`，純 CSS、無手動切換按鈕或 JS 邏輯，涵蓋 ticket 01～04 累積下來的所有既有樣式元素——`body`（背景 `#1a1a1a`、文字 `#ddd`）、`.card`（邊框 `#444`）、`.group-path`（`#999`）、`.meta`（`#aaa`）、`.title-fallback`（`#999`）、`.path-missing-warning`（改用較亮的 `#f87171` 取代淺色模式的 `#a33`，避免暗紅字在暗背景上對比不足看不清楚）、`.tool-badge` 邊框（改用 `rgba(255,255,255,0.3)` 取代淺色模式的黑色邊框，否則邊框會融入暗背景幾乎消失）、`.tool-badge-claude-code`／`.tool-badge-codex`（改用較亮的 `#f59e0b`／`#60a5fa` 取代原本 `#d97706`／`#2563eb`，在暗背景上更醒目、彼此仍可區分）、`button.copy-btn` 與 `#controls` 內的 `input`／`select`（明確指定深色背景 `#2a2a2a`＋淺色文字 `#ddd`＋邊框 `#555`，否則瀏覽器原生控制項會維持白底黑字、在暗頁面中格格不入）。`.card-path-missing` 既有的 `filter: grayscale(1); opacity: 0.7` 未變動，因為該濾鏡作用於任何背景色之上皆能正確降對比，不需深色模式專屬規則。
+- 測試：依 ticket 明確指定的驗收方式（字串檢查即可，CSS media query 非 node:vm 假 DOM 可執行的範疇），新增一個 `buildHtml` 字串斷言測試，確認產出的 HTML 中存在 `@media (prefers-color-scheme: dark)`。
+- 測試數：87 → 88（全部通過，無既有測試被破壞）。
+- 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。以 `grep` 確認產出的 `sessions-dashboard.html` 內確實含有 `prefers-color-scheme: dark`。
+- 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項）——`prefers-color-scheme` 是否正確套用、深色配色的實際可讀性與對比觀感，本質上需要在真實瀏覽器中切換系統或瀏覽器的深色模式偏好才能驗證，無法用字串比對或 `node:vm` 假 DOM 確認，留待使用者或下次工作階段人工確認。
