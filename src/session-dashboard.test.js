@@ -1278,7 +1278,7 @@ function findAllTextInCards(el) {
   return texts;
 }
 
-test('buildHtml — 超過 90 天沒有互動的 session 被抽出，集中到樹狀圖最上方的久未使用整理區，不留在原本的專案節點下', () => {
+test('buildHtml — 超過 90 天沒有互動的 session 同時出現在久未使用整理區與原本的專案節點下（不從專案節點抽走），避免使用者去專案裡找卻找不到', () => {
   const sessions = [
     {
       tool: 'claude-code', id: 'stale1', title: 'stale session title', cwd: 'C:\\work\\projA', branch: null,
@@ -1306,9 +1306,46 @@ test('buildHtml — 超過 90 天沒有互動的 session 被抽出，集中到�
 
   const projectNode = detailsEls.find((el) => !el.className.includes('tree-node--stale'));
   const projectCardTexts = findAllTextInCards(projectNode);
-  assert.equal(projectCardTexts.length, 1, 'projA 節點下應該只剩 fresh1 這張卡片');
-  assert.ok(projectCardTexts[0].includes('fresh session title'));
-  assert.ok(!projectCardTexts[0].includes('stale session title'), 'stale1 不應該再出現在 projA 的正常樹狀結構裡');
+  assert.equal(projectCardTexts.length, 2, 'projA 節點下應該仍有 stale1 與 fresh1 兩張卡片，stale1 不會被抽走');
+  assert.ok(projectCardTexts.some((t) => t.includes('fresh session title')));
+  assert.ok(projectCardTexts.some((t) => t.includes('stale session title')), 'stale1 仍應留在 projA 的正常樹狀結構裡');
+});
+
+test('buildHtml — 專案節點下久未使用的卡片會加上小標記提示「也列於整理區」，整理區內的同一筆卡片則不重複標記', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'stale1', title: 'stale session title', cwd: 'C:\\work\\projA', branch: null,
+      groupKey: 'c:/work/proja', displayName: 'projA',
+      startedAt: daysAgoIso(120), lastActiveAt: daysAgoIso(120),
+    },
+    {
+      tool: 'claude-code', id: 'fresh1', title: 'fresh session title', cwd: 'C:\\work\\projA', branch: null,
+      groupKey: 'c:/work/proja', displayName: 'projA',
+      startedAt: daysAgoIso(1), lastActiveAt: daysAgoIso(1),
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: new Date().toISOString(), skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  const staleNode = detailsEls.find((el) => el.className.includes('tree-node--stale'));
+  const projectNode = detailsEls.find((el) => !el.className.includes('tree-node--stale'));
+
+  function findAllCards(el) {
+    let cards = [];
+    if (el.className && el.className.indexOf('card') !== -1) cards.push(el);
+    (el.children || []).forEach((child) => { cards = cards.concat(findAllCards(child)); });
+    return cards;
+  }
+
+  const projectCards = findAllCards(projectNode);
+  const staleCardInProject = projectCards.find((c) => c.children[0].textContent.includes('stale session title'));
+  const freshCardInProject = projectCards.find((c) => c.children[0].textContent.includes('fresh session title'));
+  assert.ok(staleCardInProject.children.some((el) => el.className === 'stale-marker'), '專案節點下的久未使用卡片應該有 stale-marker 小標記');
+  assert.ok(!freshCardInProject.children.some((el) => el.className === 'stale-marker'), '未滿 90 天的卡片不應該有 stale-marker');
+
+  const staleCardsInStaleBlock = findAllCards(staleNode);
+  assert.equal(staleCardsInStaleBlock.length, 1);
+  assert.ok(!staleCardsInStaleBlock[0].children.some((el) => el.className === 'stale-marker'), '整理區內部的卡片本身不需要重複標記');
 });
 
 test('buildHtml — 久未使用整理區排在專案樹最上方（在所有一般專案節點之前）', () => {

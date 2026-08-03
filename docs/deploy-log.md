@@ -121,3 +121,10 @@
 - **真實資料驗證**：目前使用者本機全部 293 筆 session 中，超過 90 天沒有互動的為 0 筆（這個專案的資料最早可追溯到 2026 年 7 月，都在 90 天內），因此久未使用整理區在真實資料上目前不會顯示任何內容——這是正確行為（尚未有真的「久未使用」的 session），已改用 6 個合成測試資料的自動化測試涵蓋核心邏輯正確性；隨真實使用時間累積，未來會自然開始出現內容。CSS class（`.tree-node--stale`，淺色+深色各一條）與 JS 邏輯（`createTreeNode('tree-node--project tree-node--stale')`）皆已確認存在於部署後的 `sessions-dashboard.html`。
 - **部署**：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，`node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。
 - **未完成**：肉眼瀏覽器 QA（視覺呈現、摺疊/展開手感）——因真實資料目前沒有任何久未使用的 session 可供實際觀察，留待未來累積出真實案例、或使用者自行調整系統時間/合成測試資料在瀏覽器中確認。刪除/歸檔功能本身（使用者已表示是下一個獨立議題）本次未觸碰。
+
+## 2026-08-03T03:45:00Z
+- **修正久未使用整理區的設計缺陷（使用者發現）**：原設計把 >90 天的 session 從專案節點「抽出」，只留在整理區——使用者指出這會讓人以為 session 消失了：如果不知道它被歸類到整理區，去專案裡找會找不到。改為 session 同時出現在兩處：專案樹本體（`treeSessions`）維持套用全部四個篩選（含時間範圍）正常渲染；久未使用整理區（`staleSessions`）另外獨立判斷、不受時間範圍篩選影響（見上一則記錄的既有理由）。兩邊條件皆符合時，同一筆 session 會同時出現在兩處。
+- **新增小標記**：專案節點下若某張卡片本身也被列入久未使用整理區，加上 `.stale-marker`（「久未使用（也列於最上方整理區）」，橘色系跟 `.tree-node--stale` 一致），讓使用者在專案裡找到它時就知道它同時被列在整理區，不會覺得意外。整理區內部渲染同一筆卡片時（`renderCard(s, container, { hideStaleMarker: true })`）不重複標記——已經在整理區裡了，不需要再提示一次「也列在整理區」。
+- **附帶研究並回答使用者「刪除 session 是否為官方建議做法」的提問**：查證 Claude Code 官方本身有 `cleanupPeriodDays` 設定（預設 30 天），會在每次啟動時靜默刪除超過此天數的 session transcript，無法復原（[官方文件](https://code.claude.com/docs/en/claude-directory)、[GitHub Issue #59248](https://github.com/anthropics/claude-code/issues/59248)）。使用者的 `~/.claude/settings.json` 未設定此值，即採用預設 30 天——這也解釋了為何真實資料中找不到任何超過 90 天的 Claude Code session（並非巧合，是官方本身已經在自動清理）。Codex 這邊查到的「依天數自動刪除」設定（`config.toml` 的 `[memories]` 區段）僅有第三方部落格佐證，非官方文件，使用者的 `config.toml` 也未設定這些值；但本機 `~/.codex/archived_sessions/` 目錄確實存在，證實 Codex 官方至少有「封存」機制（這個工具原本就有掃描這個資料夾）。此發現記錄於此，供使用者後續決定刪除功能設計時參考——Claude Code session 幾乎不可能活過 90 天，本功能未來主要對 Codex session 有意義。
+- **測試數：123 → 124**（重寫原本假設「互斥」的回歸測試為驗證「同時出現在兩處」；新增一個驗證小標記正確套用/不重複套用的測試），全部通過，無既有測試被破壞。
+- **部署**：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，`node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。確認 `.stale-marker`（淺色+深色 CSS 各一條、JS 邏輯）存在於部署後的 `sessions-dashboard.html`；真實資料同上一則記錄，目前無任何 >90 天的 session 可供實際觀察。

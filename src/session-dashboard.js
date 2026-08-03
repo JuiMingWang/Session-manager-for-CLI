@@ -606,6 +606,7 @@ function buildHtml(sessions, meta = {}) {
   .title-fallback { color: #888; font-style: italic; }
   .card-path-missing { filter: grayscale(1); opacity: 0.7; }
   .path-missing-warning { color: #a33; font-weight: bold; }
+  .stale-marker { color: #a56a1a; font-size: 0.85rem; }
   .tool-badge { display: inline-block; width: 0.7em; height: 0.7em; border-radius: 3px; margin-left: 0.4em; vertical-align: middle; border: 1px solid rgba(0,0,0,0.25); }
   .tool-badge-claude-code { background: #d97706; }
   .tool-badge-codex { background: #2563eb; }
@@ -624,6 +625,7 @@ function buildHtml(sessions, meta = {}) {
     .meta { color: #aaa; }
     .title-fallback { color: #999; }
     .path-missing-warning { color: #f87171; }
+    .stale-marker { color: #d99a4e; }
     .tool-badge { border-color: rgba(255, 255, 255, 0.3); }
     .tool-badge-claude-code { background: #f59e0b; }
     .tool-badge-codex { background: #60a5fa; }
@@ -765,26 +767,31 @@ function buildHtml(sessions, meta = {}) {
         return true;
       });
 
-      // 久未使用整理區：>90 天沒有互動的 session 從各自的專案節點抽出，集中到樹狀圖
-      // 最上方一個獨立、跨專案、預設摺疊的區塊，方便使用者一次看完所有可能不再需要的
-      // session，而不用一個個專案點開找。閥值先寫死，本輪不做刪除/歸檔，純顯示用途。
-      // 刻意不套用時間範圍篩選（range-filter）——那個篩選的語意是「只看最近 N 天內有
-      // 活動的」，跟久未使用（>90 天沒活動）的目的正好相反；預設 30 天的範圍篩選會讓
-      // 這個整理區永遠是空的。搜尋/分類/工具篩選則正常套用，跟樹狀圖其餘部分一致。
+      // 久未使用整理區：>90 天沒有互動的 session 額外集中列在樹狀圖最上方一個獨立、
+      // 跨專案、預設摺疊的區塊，方便使用者一次看完所有可能不再需要的 session，而不用
+      // 一個個專案點開找。這些 session 仍然照舊留在自己原本的專案節點下——不從那裡
+      // 抽走，避免使用者去專案裡找某筆 session 卻因為它被搬到別處而找不到。閥值先寫
+      // 死，本輪不做刪除/歸檔，純顯示用途。
+      // 整理區的篩選刻意不套用時間範圍篩選（range-filter）——那個篩選的語意是「只看
+      // 最近 N 天內有活動的」，跟久未使用（>90 天沒活動）的目的正好相反；預設 30 天
+      // 的範圍篩選會讓這個整理區永遠是空的。搜尋/分類/工具篩選則正常套用，跟樹狀圖
+      // 其餘部分一致。專案樹本體（treeSessions）則正常套用全部四個篩選，包含時間範
+      // 圍——一筆 session 若同時符合兩邊條件，會同時出現在整理區與專案樹裡。
       var STALE_THRESHOLD_MS = 90 * 24 * 60 * 60 * 1000;
+      function isStaleSession(s) {
+        return now - new Date(s.lastActiveAt).getTime() > STALE_THRESHOLD_MS;
+      }
       var staleSessions = [];
-      var freshSessions = [];
+      var treeSessions = [];
       searchCategoryToolFiltered.forEach(function (s) {
+        if (isStaleSession(s)) staleSessions.push(s);
         var age = now - new Date(s.lastActiveAt).getTime();
-        if (age > STALE_THRESHOLD_MS) {
-          staleSessions.push(s);
-        } else if (age <= rangeMs) {
-          freshSessions.push(s);
-        }
+        if (age <= rangeMs) treeSessions.push(s);
       });
-      freshSessions.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
+      treeSessions.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
 
-      function renderCard(s, container) {
+      function renderCard(s, container, options) {
+        var hideStaleMarker = options && options.hideStaleMarker;
         var card = document.createElement('div');
         card.className = s.pathExists === false ? 'card card-path-missing' : 'card';
 
@@ -801,6 +808,15 @@ function buildHtml(sessions, meta = {}) {
           warningEl.className = 'path-missing-warning';
           warningEl.textContent = '資料夾已不存在';
           card.appendChild(warningEl);
+        }
+
+        // 專案樹本體裡的卡片若同時被列在久未使用整理區，加一個小標記提示使用者「這筆
+        // 也在最上方整理區」；整理區內部渲染的卡片本身不需要再提示一次（hideStaleMarker）。
+        if (!hideStaleMarker && isStaleSession(s)) {
+          var staleMarkerEl = document.createElement('div');
+          staleMarkerEl.className = 'stale-marker';
+          staleMarkerEl.textContent = '久未使用（也列於最上方整理區）';
+          card.appendChild(staleMarkerEl);
         }
 
         var metaEl = document.createElement('div');
@@ -822,7 +838,7 @@ function buildHtml(sessions, meta = {}) {
       }
 
       var groups = new Map();
-      freshSessions.forEach(function (s) {
+      treeSessions.forEach(function (s) {
         if (!groups.has(s.groupKey)) groups.set(s.groupKey, []);
         groups.get(s.groupKey).push(s);
       });
@@ -903,7 +919,7 @@ function buildHtml(sessions, meta = {}) {
         staleSessions.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
         var staleNode = createTreeNode('tree-node--project tree-node--stale');
         staleNode.summary.textContent = '久未使用（超過 90 天）（' + staleSessions.length + ' 筆）';
-        staleSessions.forEach(function (s) { renderCard(s, staleNode.body); });
+        staleSessions.forEach(function (s) { renderCard(s, staleNode.body, { hideStaleMarker: true }); });
         app.appendChild(staleNode.details);
       }
 
