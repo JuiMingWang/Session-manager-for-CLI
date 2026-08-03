@@ -434,6 +434,32 @@ test('readExpandingHeadRecords expands the read window when the genuine message 
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
+test('readExpandingHeadRecords stops after one read for a genuinely short/empty file instead of expanding all the way to the cap', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'short-empty.jsonl');
+  // A short file (fewer than the initial 20-record window) with no genuine user message —
+  // e.g. a cancelled /resume. readFirstJsonLines hitting EOF (records.length < n) means a
+  // bigger window would return the exact same records, so expansion must not be attempted.
+  writeJsonl(filePath, [
+    { type: 'mode', mode: 'default' },
+    { type: 'system', subtype: 'local_command', content: '<local-command-stdout>Resume cancelled</local-command-stdout>' },
+  ]);
+  const originalOpenSync = fsForTests.openSync;
+  let openCount = 0;
+  fsForTests.openSync = function (...args) {
+    openCount += 1;
+    return originalOpenSync.apply(fsForTests, args);
+  };
+  try {
+    const records = readExpandingHeadRecords(filePath, claudeUserMatchersForTest);
+    assert.equal(openCount, 1, '檔案已讀到結尾（EOF），擴大窗口也不會有新內容，不應再多讀');
+    assert.equal(records.length, 2);
+  } finally {
+    fsForTests.openSync = originalOpenSync;
+  }
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
 test('scanClaudeCodeFile finds a real title and firstMessagePreview past the fixed 20-record window when skill-invocation noise delays the first genuine message (regression for def4a233-like sessions)', () => {
   const dir = makeTempDir();
   const filePath = pathForTests.join(dir, 'projects', 'proj', 'skill-noise-def4a233.jsonl');
@@ -616,6 +642,20 @@ test('isSyntheticCodexText flags known injected prefixes observed in real rollou
   assert.equal(isSyntheticCodexText('<permissions instructions>\nFilesystem sandboxing...'), true);
   assert.equal(isSyntheticCodexText('# Context from my IDE setup:\n\n## Open tabs:'), true);
   assert.equal(isSyntheticCodexText('幫我修一下這個 bug'), false);
+});
+
+// Regression: Codex's automated approval/risk-review sub-loop ends a turn with a raw JSON
+// verdict instead of prose (real data: ~44% of sessions' last assistant turn looked like
+// this), which none of the prefix/heading heuristics above catch since it starts with '{'.
+test('isSyntheticCodexText flags a raw JSON approval-verdict blob as synthetic', () => {
+  assert.equal(
+    isSyntheticCodexText('{"risk_level":"low","user_authorization":"high","outcome":"allow"}'),
+    true
+  );
+});
+
+test('isSyntheticCodexText does not flag a real message that merely starts with "{"', () => {
+  assert.equal(isSyntheticCodexText('{這個變數該怎麼命名比較好？'), false);
 });
 
 // Regression test for a real misclassification found during manual browser QA: a Codex

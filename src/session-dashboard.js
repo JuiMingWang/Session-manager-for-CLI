@@ -220,7 +220,15 @@ const HEAD_SCAN_MAX_WINDOW = 500;
 function readExpandingHeadRecords(filePath, matchers) {
   let n = HEAD_SCAN_INITIAL_WINDOW;
   let records = readFirstJsonLines(filePath, n);
-  while (n < HEAD_SCAN_MAX_WINDOW && findGenuineMessageText(records, matchers) === null) {
+  // records.length < n means readFirstJsonLines hit EOF before filling the window — the
+  // file is simply short (e.g. a cancelled /resume with no real messages ever sent), so
+  // re-reading a bigger window would return the exact same records. Stop immediately
+  // instead of paying up to 3 wasted reads on every genuinely-empty session.
+  while (
+    n < HEAD_SCAN_MAX_WINDOW &&
+    records.length === n &&
+    findGenuineMessageText(records, matchers) === null
+  ) {
     n = Math.min(n * HEAD_SCAN_EXPANSION_FACTOR, HEAD_SCAN_MAX_WINDOW);
     records = readFirstJsonLines(filePath, n);
   }
@@ -405,6 +413,17 @@ function isSyntheticCodexText(text) {
   const trimmed = String(text).trim();
   if (!trimmed) return true;
   if (CODEX_SYNTHETIC_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return true;
+  // Codex's automated approval/risk-review sub-loop ends turns with a raw JSON verdict
+  // (e.g. {"risk_level":"low",...,"outcome":"allow"}) instead of prose — real data shows
+  // this on ~44% of sessions' last assistant turn, far too common to leave as the preview.
+  if (trimmed.startsWith('{')) {
+    try {
+      JSON.parse(trimmed);
+      return true;
+    } catch (err) {
+      // Not actually JSON (e.g. a real message that happens to start with '{') — fall through.
+    }
+  }
   return looksLikeInjectedDocument(trimmed);
 }
 

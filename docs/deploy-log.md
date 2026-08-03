@@ -102,3 +102,12 @@
 - **效能（`main()` 端到端，真實資料，`Date.now()` 量測）**：修正前 483ms；修正後三次量測 821ms／784ms／754ms（約 750-820ms）。**這是一個可量測的退化（約 +300ms，+60~70%），比規格預期的「少數病態檔案重讀」範圍更大**：根因是任何「真的從未出現過真實使用者訊息」的 session（不只是雜訊延後的病態案例，也包含前述合法的空 session）都會在 `readExpandingHeadRecords` 中找不到目標、被迫一路擴展到 500 上限才停止，等於固定多付 3 次額外讀取；真實資料中這類 session 約佔 29%（85/293，即修正前 `firstMessagePreview` 為 `null` 的全部案例）。800ms 對 293 筆 session 的本機小工具而言仍在可接受範圍內（<1 秒），但明確记錄於此，不歸類為「無感」。
 - **部署驗證**：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet`，exit code 0。上述真實資料統計皆基於此次重新產生的輸出對應的即時掃描（直接呼叫 `main.scanClaudeCode`/`main.scanCodex`），非另外憑空計算。
 - **與規格的偏離**：無函式簽章或設計方向的偏離，`readFirstJsonLines`/`readLastJsonLines` 契約完全未動；上述兩點（效能退化幅度、JSON caveat 實際比例）均是「規格預期範圍 vs 真實資料量測結果」的落差，如上分別記錄，未擅自變更設計去補償（例如未新增 JSON 偵測、未進一步優化擴展讀取），依指示原樣保留供使用者決定是否需要後續調整。
+
+## 2026-08-03T02:45:00Z
+- **針對上一則記錄的兩個已知落差，使用者確認後追加修正**：
+  1. **效能退化**：`readExpandingHeadRecords` 新增 EOF 判斷——`readFirstJsonLines(filePath, n)` 回傳的筆數若小於要求的 `n`，代表已經讀到檔案結尾（該檔案本身就短，例如取消的 `/resume`），再擴大窗口重讀也只會得到一模一樣的內容，因此直接停止擴展，不再機械性地擴大到 500 上限。合法空 session 現在只需 1 次讀取，回到接近修正前的成本；真正需要多讀（雜訊延後、`def4a233` 型案例）的行為不受影響。
+  2. **Codex JSON caveat**：`isSyntheticCodexText` 新增判斷——文字以 `{` 開頭且能被 `JSON.parse` 成功解析時，視為 synthetic（自動核准／風險審查子流程的結尾回覆），跳過繼續往前找真正的對話文字；若 `JSON.parse` 失敗（例如一則剛好以 `{` 開頭的真實訊息）則不受影響。
+- **測試數：115 → 118**（新增：合法空檔案只觸發 1 次 `fs.openSync` 的效能回歸測試；`isSyntheticCodexText` 對 JSON 核准回覆判定為 synthetic、對「剛好以 `{` 開頭的真實訊息」判定為非 synthetic 的兩個測試），全部通過，無既有測試被破壞。
+- **真實資料重新驗證**（`os.homedir()` 下全部 293 筆 session）：`firstMessagePreview` 為 `null`：47（與上一輪修正後相同，此輪不影響 first）；`lastMessagePreview` 為 `null`：19 → 29（**上升**，原因是原本 104 筆被誤判為「有內容」的 JSON 回覆，其中一部分往前找不到更早的真實文字，正確地改回顯示 `null`，而非顯示 JSON 亂碼——這是預期中的正確行為轉變，不是新 bug）；全部 237 筆 Codex session 中 `lastMessagePreview` 仍以 `{` 開頭者：0 筆（原本 104 筆全部被正確過濾或往前找到真實文字）。`def4a233` 案例維持修正：`firstMessagePreview` 正確顯示真實訊息。
+- **效能**：`main()` 端到端 717~980ms（多次量測），相較上一輪 750~820ms 未見明顯改善——進一步排查（`scanCodexFile` 逐檔計時）顯示成本平均分攤在 237 個 Codex 檔案上（每檔約 3ms，無單一病態大檔），主因是 ticket 08 本身為每個 session 新增的「檔頭＋檔尾各一次額外讀取」是功能固有成本，而非本輪或上輪修正引入的退化。293 筆 session 總計仍 <1 秒，對本機小工具而言可接受，記錄於此供未來若有更大規模資料時參考（可能的優化方向：檔案掃描平行化，本次未做）。
+- **部署**：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，`node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。
