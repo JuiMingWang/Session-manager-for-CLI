@@ -1264,6 +1264,122 @@ test('buildHtml — 單一時間區間展開後不分頁，全部顯示（無論
   assert.ok(!bucketBody.children.some((el) => el.tagName === 'BUTTON' && /更多/.test(el.textContent)), '不應該有「顯示更多」按鈕');
 });
 
+function daysAgoIso(days) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+// A card's own .textContent is never set directly (only its title-div child's is, e.g. in
+// renderCard) — mirrors the existing `card.children[0].textContent` pattern used elsewhere
+// in this file, just generalized to find every card under an arbitrary subtree.
+function findAllTextInCards(el) {
+  let texts = [];
+  if (el.className && el.className.indexOf('card') !== -1) texts.push(el.children[0].textContent);
+  (el.children || []).forEach((child) => { texts = texts.concat(findAllTextInCards(child)); });
+  return texts;
+}
+
+test('buildHtml — 超過 90 天沒有互動的 session 被抽出，集中到樹狀圖最上方的久未使用整理區，不留在原本的專案節點下', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'stale1', title: 'stale session title', cwd: 'C:\\work\\projA', branch: null,
+      groupKey: 'c:/work/proja', displayName: 'projA',
+      startedAt: daysAgoIso(120), lastActiveAt: daysAgoIso(120),
+    },
+    {
+      tool: 'claude-code', id: 'fresh1', title: 'fresh session title', cwd: 'C:\\work\\projA', branch: null,
+      groupKey: 'c:/work/proja', displayName: 'projA',
+      startedAt: daysAgoIso(1), lastActiveAt: daysAgoIso(1),
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: new Date().toISOString(), skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.equal(detailsEls.length, 2, '應該有久未使用整理區＋projA 兩個頂層節點');
+
+  const staleNode = detailsEls.find((el) => el.className.includes('tree-node--stale'));
+  assert.ok(staleNode, '久未使用整理區應該存在');
+  assert.equal(staleNode.children[0].textContent, '久未使用（超過 90 天）（1 筆）');
+  assert.equal(staleNode.open, false, '久未使用整理區也必須預設收合');
+  const staleCardTexts = findAllTextInCards(staleNode);
+  assert.equal(staleCardTexts.length, 1);
+  assert.ok(staleCardTexts[0].includes('stale session title'));
+
+  const projectNode = detailsEls.find((el) => !el.className.includes('tree-node--stale'));
+  const projectCardTexts = findAllTextInCards(projectNode);
+  assert.equal(projectCardTexts.length, 1, 'projA 節點下應該只剩 fresh1 這張卡片');
+  assert.ok(projectCardTexts[0].includes('fresh session title'));
+  assert.ok(!projectCardTexts[0].includes('stale session title'), 'stale1 不應該再出現在 projA 的正常樹狀結構裡');
+});
+
+test('buildHtml — 久未使用整理區排在專案樹最上方（在所有一般專案節點之前）', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'fresh1', title: 't', cwd: 'C:\\work\\aaa', branch: null,
+      groupKey: 'c:/work/aaa', displayName: 'aaa',
+      startedAt: daysAgoIso(1), lastActiveAt: daysAgoIso(1),
+    },
+    {
+      tool: 'claude-code', id: 'stale1', title: 't', cwd: 'C:\\work\\bbb', branch: null,
+      groupKey: 'c:/work/bbb', displayName: 'bbb',
+      startedAt: daysAgoIso(200), lastActiveAt: daysAgoIso(200),
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: new Date().toISOString(), skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.ok(detailsEls[0].className.includes('tree-node--stale'), '久未使用整理區必須是第一個頂層節點');
+});
+
+test('buildHtml — 沒有任何久未使用的 session 時，不渲染久未使用整理區', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'fresh1', title: 't', cwd: 'C:\\work\\aaa', branch: null,
+      groupKey: 'c:/work/aaa', displayName: 'aaa',
+      startedAt: daysAgoIso(1), lastActiveAt: daysAgoIso(1),
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: new Date().toISOString(), skippedCount: 0 });
+  const { app } = runDashboardScript(html, { 'range-filter': 'all' });
+  const detailsEls = app.children.filter((el) => el.tagName === 'DETAILS');
+  assert.ok(!detailsEls.some((el) => el.className.includes('tree-node--stale')));
+});
+
+test('buildHtml — 久未使用整理區不受時間範圍篩選（range-filter）影響，即使預設 30 天篩選也看得到', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'stale1', title: 't', cwd: 'C:\\work\\ccc', branch: null,
+      groupKey: 'c:/work/ccc', displayName: 'ccc',
+      startedAt: daysAgoIso(150), lastActiveAt: daysAgoIso(150),
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: new Date().toISOString(), skippedCount: 0 });
+  // 不覆寫 range-filter，沿用 HTML 內建的預設值（30 天）。
+  const { app } = runDashboardScript(html, {});
+  const staleNode = app.children.find((el) => el.className.includes('tree-node--stale'));
+  assert.ok(staleNode, '即使在預設 30 天範圍篩選下，久未使用整理區仍應該顯示（該篩選語意相反，不應套用於此）');
+  assert.equal(staleNode.children[0].textContent, '久未使用（超過 90 天）（1 筆）');
+});
+
+test('buildHtml — 久未使用整理區仍受搜尋框篩選影響（跟樹狀圖其餘部分一致）', () => {
+  const sessions = [
+    {
+      tool: 'claude-code', id: 'stale1', title: 'apple project', cwd: 'C:\\work\\apple', branch: null,
+      groupKey: 'c:/work/apple', displayName: 'apple',
+      startedAt: daysAgoIso(150), lastActiveAt: daysAgoIso(150),
+    },
+    {
+      tool: 'claude-code', id: 'stale2', title: 'banana project', cwd: 'C:\\work\\banana', branch: null,
+      groupKey: 'c:/work/banana', displayName: 'banana',
+      startedAt: daysAgoIso(150), lastActiveAt: daysAgoIso(150),
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: new Date().toISOString(), skippedCount: 0 });
+  const { app } = runDashboardScript(html, { search: 'apple', 'range-filter': 'all' });
+  const staleNode = app.children.find((el) => el.className.includes('tree-node--stale'));
+  assert.ok(staleNode);
+  assert.equal(staleNode.children[0].textContent, '久未使用（超過 90 天）（1 筆）');
+});
+
 test('buildHtml marks a titleIsFallback card with a distinct style, leaving a real title unmarked', () => {
   const sessions = [
     {

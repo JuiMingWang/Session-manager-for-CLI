@@ -601,6 +601,7 @@ function buildHtml(sessions, meta = {}) {
   .tree-node--project > summary.tree-summary { font-weight: bold; }
   .tree-node--path > summary.tree-summary { color: #888; font-size: 0.85rem; font-family: monospace; }
   .tree-node--time > summary.tree-summary { color: #666; font-size: 0.85rem; }
+  .tree-node--stale > summary.tree-summary { color: #a56a1a; }
   .meta { color: #666; font-size: 0.85rem; }
   .title-fallback { color: #888; font-style: italic; }
   .card-path-missing { filter: grayscale(1); opacity: 0.7; }
@@ -619,6 +620,7 @@ function buildHtml(sessions, meta = {}) {
     .tree-node > .tree-body { border-left-color: #444; }
     .tree-node--path > summary.tree-summary { color: #999; }
     .tree-node--time > summary.tree-summary { color: #aaa; }
+    .tree-node--stale > summary.tree-summary { color: #d99a4e; }
     .meta { color: #aaa; }
     .title-fallback { color: #999; }
     .path-missing-warning { color: #f87171; }
@@ -755,17 +757,32 @@ function buildHtml(sessions, meta = {}) {
       var now = Date.now();
       var rangeMs = range === 'all' ? Infinity : Number(range) * 24 * 60 * 60 * 1000;
 
-      var filtered = DATA.sessions.filter(function (s) {
+      var searchCategoryToolFiltered = DATA.sessions.filter(function (s) {
         if (tool !== 'all' && s.tool !== tool) return false;
         if (category === 'misc' && s.groupKey !== '__misc__') return false;
         if (category === 'project' && s.groupKey === '__misc__') return false;
         if (searchTerm && normalize(s.title + ' ' + s.cwd).indexOf(searchTerm) === -1) return false;
-        var age = now - new Date(s.lastActiveAt).getTime();
-        if (age > rangeMs) return false;
         return true;
       });
 
-      filtered.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
+      // 久未使用整理區：>90 天沒有互動的 session 從各自的專案節點抽出，集中到樹狀圖
+      // 最上方一個獨立、跨專案、預設摺疊的區塊，方便使用者一次看完所有可能不再需要的
+      // session，而不用一個個專案點開找。閥值先寫死，本輪不做刪除/歸檔，純顯示用途。
+      // 刻意不套用時間範圍篩選（range-filter）——那個篩選的語意是「只看最近 N 天內有
+      // 活動的」，跟久未使用（>90 天沒活動）的目的正好相反；預設 30 天的範圍篩選會讓
+      // 這個整理區永遠是空的。搜尋/分類/工具篩選則正常套用，跟樹狀圖其餘部分一致。
+      var STALE_THRESHOLD_MS = 90 * 24 * 60 * 60 * 1000;
+      var staleSessions = [];
+      var freshSessions = [];
+      searchCategoryToolFiltered.forEach(function (s) {
+        var age = now - new Date(s.lastActiveAt).getTime();
+        if (age > STALE_THRESHOLD_MS) {
+          staleSessions.push(s);
+        } else if (age <= rangeMs) {
+          freshSessions.push(s);
+        }
+      });
+      freshSessions.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
 
       function renderCard(s, container) {
         var card = document.createElement('div');
@@ -805,7 +822,7 @@ function buildHtml(sessions, meta = {}) {
       }
 
       var groups = new Map();
-      filtered.forEach(function (s) {
+      freshSessions.forEach(function (s) {
         if (!groups.has(s.groupKey)) groups.set(s.groupKey, []);
         groups.get(s.groupKey).push(s);
       });
@@ -880,6 +897,14 @@ function buildHtml(sessions, meta = {}) {
           items.forEach(function (s) { renderCard(s, node.body); });
           container.appendChild(node.details);
         });
+      }
+
+      if (staleSessions.length > 0) {
+        staleSessions.sort(function (a, b) { return new Date(b.lastActiveAt) - new Date(a.lastActiveAt); });
+        var staleNode = createTreeNode('tree-node--project tree-node--stale');
+        staleNode.summary.textContent = '久未使用（超過 90 天）（' + staleSessions.length + ' 筆）';
+        staleSessions.forEach(function (s) { renderCard(s, staleNode.body); });
+        app.appendChild(staleNode.details);
       }
 
       clusterEntries.forEach(function (entry) {
