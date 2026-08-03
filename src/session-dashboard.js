@@ -204,6 +204,29 @@ function extractLastMessagePreview(records, matchers) {
   return text === null ? null : buildMessagePreview(text);
 }
 
+// A fixed 20-record head window is enough for the vast majority of sessions, but real data
+// shows skill invocations (e.g. a `/some-skill:name` command) each burn 2 head slots — a
+// `<command-name>` line plus a large synthetic "Base directory for this skill: ..." body,
+// both arriving as synthetic user-role records — before the first genuine human message
+// ever appears, pushing it past record 20 and making title extraction and
+// firstMessagePreview wrongly fall back to null/synthetic. Only widen the read when the
+// fixed window truly found nothing genuine yet (the common case costs exactly one read, same
+// as before); re-reading from byte 0 on each expansion is cheap and bounded to a handful of
+// tries by HEAD_SCAN_MAX_WINDOW, well short of reading a whole file.
+const HEAD_SCAN_INITIAL_WINDOW = 20;
+const HEAD_SCAN_EXPANSION_FACTOR = 3;
+const HEAD_SCAN_MAX_WINDOW = 500;
+
+function readExpandingHeadRecords(filePath, matchers) {
+  let n = HEAD_SCAN_INITIAL_WINDOW;
+  let records = readFirstJsonLines(filePath, n);
+  while (n < HEAD_SCAN_MAX_WINDOW && findGenuineMessageText(records, matchers) === null) {
+    n = Math.min(n * HEAD_SCAN_EXPANSION_FACTOR, HEAD_SCAN_MAX_WINDOW);
+    records = readFirstJsonLines(filePath, n);
+  }
+  return records;
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code title extraction
 // ---------------------------------------------------------------------------
@@ -240,6 +263,16 @@ function isSyntheticClaudeText(text) {
 
 const CLAUDE_MESSAGE_MATCHERS = {
   isCandidate: (record) => record.type === 'user' && record.isMeta !== true,
+  extractText: (record) => extractMessageText(record.message),
+  isSynthetic: isSyntheticClaudeText,
+};
+
+// For lastMessagePreview only (never title extraction or firstMessagePreview): the last
+// genuine message can legitimately be the assistant's, since that's often where the
+// conversation actually left off. extractMessageText already only pulls type:'text' blocks,
+// so a pure thinking/tool_use assistant record naturally yields '' and is skipped as synthetic.
+const CLAUDE_LAST_MESSAGE_MATCHERS = {
+  isCandidate: (record) => (record.type === 'user' || record.type === 'assistant') && record.isMeta !== true,
   extractText: (record) => extractMessageText(record.message),
   isSynthetic: isSyntheticClaudeText,
 };
@@ -301,21 +334,21 @@ function findClaudeCwdAndBranch(records) {
 const TAIL_MESSAGE_SCAN_WINDOW = 60;
 
 function scanClaudeCodeFile(filePath, homeDir) {
-  const records = readFirstJsonLines(filePath, 20);
+  const records = readExpandingHeadRecords(filePath, CLAUDE_MESSAGE_MATCHERS);
   if (records.length === 0) {
     throw new Error(`no parseable JSON records found in ${filePath}`);
   }
   const { cwd, branch } = findClaudeCwdAndBranch(records);
   const effectiveCwd = cwd || homeDir;
   const stat = fs.statSync(filePath);
-  const extractedTitle = extractClaudeTitle(records);
+  const extractedTitle = extractClaudeTitle(records, records.length);
   const titleIsFallback = !extractedTitle;
   const title =
     extractedTitle || `${displayNameForCwd(effectiveCwd)} (${stat.birthtime.toISOString()})`;
   const pathExists = fs.existsSync(effectiveCwd);
   const firstMessagePreview = extractFirstMessagePreview(records, CLAUDE_MESSAGE_MATCHERS);
   const tailRecords = readLastJsonLines(filePath, TAIL_MESSAGE_SCAN_WINDOW);
-  const lastMessagePreview = extractLastMessagePreview(tailRecords, CLAUDE_MESSAGE_MATCHERS);
+  const lastMessagePreview = extractLastMessagePreview(tailRecords, CLAUDE_LAST_MESSAGE_MATCHERS);
   return {
     tool: 'claude-code',
     id: path.basename(filePath, '.jsonl'),
@@ -385,6 +418,31 @@ const CODEX_MESSAGE_MATCHERS = {
   isSynthetic: isSyntheticCodexText,
 };
 
+// For lastMessagePreview only: accepts both input_text (user) and output_text (assistant)
+// item types unconditionally — a record only ever has one or the other in practice, so no
+// role branching is needed. Known caveat: some Codex sessions run an internal auto-approval
+// sub-loop whose output_text is a raw JSON blob (e.g. {"risk_level":"low",...}) rather than
+// prose; isSyntheticCodexText's heading/tag heuristics don't catch JSON (it starts with `{`),
+// so a small number of sessions' lastMessagePreview may show that raw JSON. Accepted edge case.
+function extractResponseItemTextAnyRole(payload) {
+  const content = payload && payload.content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((item) => item && (item.type === 'input_text' || item.type === 'output_text'))
+    .map((item) => item.text || '')
+    .join('\n');
+}
+
+const CODEX_LAST_MESSAGE_MATCHERS = {
+  isCandidate: (record) =>
+    record.type === 'response_item' &&
+    !!record.payload &&
+    record.payload.type === 'message' &&
+    (record.payload.role === 'user' || record.payload.role === 'assistant'),
+  extractText: (record) => extractResponseItemTextAnyRole(record.payload),
+  isSynthetic: isSyntheticCodexText,
+};
+
 function extractCodexTitle(records, maxScan = 20) {
   const text = findGenuineMessageText(records.slice(0, maxScan), CODEX_MESSAGE_MATCHERS);
   return text === null ? null : text.slice(0, 120);
@@ -414,7 +472,7 @@ function loadCodexIndex(indexFilePath) {
 // ---------------------------------------------------------------------------
 
 function scanCodexFile(filePath, indexMap, homeDir) {
-  const records = readFirstJsonLines(filePath, 20);
+  const records = readExpandingHeadRecords(filePath, CODEX_MESSAGE_MATCHERS);
   if (records.length === 0) {
     throw new Error(`no parseable JSON records found in ${filePath}`);
   }
@@ -426,13 +484,13 @@ function scanCodexFile(filePath, indexMap, homeDir) {
   const stat = fs.statSync(filePath);
 
   const indexTitle = indexMap.has(id) ? indexMap.get(id) : null;
-  const extractedTitle = indexTitle || extractCodexTitle(records);
+  const extractedTitle = indexTitle || extractCodexTitle(records, records.length);
   const titleIsFallback = !extractedTitle;
   const title = extractedTitle || `${displayNameForCwd(cwd)} (${stat.birthtime.toISOString()})`;
   const pathExists = fs.existsSync(cwd);
   const firstMessagePreview = extractFirstMessagePreview(records, CODEX_MESSAGE_MATCHERS);
   const tailRecords = readLastJsonLines(filePath, TAIL_MESSAGE_SCAN_WINDOW);
-  const lastMessagePreview = extractLastMessagePreview(tailRecords, CODEX_MESSAGE_MATCHERS);
+  const lastMessagePreview = extractLastMessagePreview(tailRecords, CODEX_LAST_MESSAGE_MATCHERS);
 
   return {
     tool: 'codex',
@@ -903,6 +961,7 @@ module.exports = {
   parseArgs,
   readFirstJsonLines,
   readLastJsonLines,
+  readExpandingHeadRecords,
   extractMessageText,
   isSyntheticClaudeText,
   extractClaudeTitle,
@@ -910,6 +969,7 @@ module.exports = {
   scanClaudeCodeFile,
   scanClaudeCode,
   extractResponseItemText,
+  extractResponseItemTextAnyRole,
   isSyntheticCodexText,
   extractCodexTitle,
   loadCodexIndex,

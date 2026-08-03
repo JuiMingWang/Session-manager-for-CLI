@@ -368,6 +368,119 @@ test('scanClaudeCodeFile sets firstMessagePreview/lastMessagePreview to null whe
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
+// Regression coverage for a real bug found after ticket 08 shipped: readFirstJsonLines(filePath, 20)
+// was called ONCE and reused as a fixed head window for both title extraction and
+// firstMessagePreview. Real skill invocations (e.g. a `/some-skill:name` command) each burn 2 head
+// slots — a `<command-name>` line plus a large synthetic "Base directory for this skill: ..." body —
+// before the first genuine human message appears, so a session with 2+ skill invocations up front
+// pushes the real message past record 20 and both title and firstMessagePreview wrongly fell back
+// to null/synthetic. Mirrors the real session def4a233-683d-4e90-b52a-37aa006f5fe5.
+const { readExpandingHeadRecords } = require('./session-dashboard.js');
+
+const claudeUserMatchersForTest = {
+  isCandidate: (record) => record.type === 'user' && record.isMeta !== true,
+  extractText: (record) => extractMessageText(record.message),
+  isSynthetic: isSyntheticClaudeText,
+};
+
+test('readExpandingHeadRecords reads only once when a genuine message is already within the initial window (no extra cost in the common case)', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'quick.jsonl');
+  writeJsonl(filePath, [
+    { type: 'mode', mode: 'default' },
+    { type: 'user', message: { content: '這則訊息在前 20 筆內' } },
+  ]);
+  const originalOpenSync = fsForTests.openSync;
+  let openCount = 0;
+  fsForTests.openSync = function (...args) {
+    openCount += 1;
+    return originalOpenSync.apply(fsForTests, args);
+  };
+  try {
+    const records = readExpandingHeadRecords(filePath, claudeUserMatchersForTest);
+    assert.equal(openCount, 1, '找到即回傳，不應多讀一次檔案');
+    assert.equal(records.length, 2);
+  } finally {
+    fsForTests.openSync = originalOpenSync;
+  }
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readExpandingHeadRecords expands the read window when the genuine message lies beyond the initial 20 records (real skill-invocation-noise case)', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'noisy.jsonl');
+  const noiseRecords = [];
+  for (let i = 0; i < 11; i += 1) {
+    noiseRecords.push({ type: 'file-history-snapshot', i });
+    noiseRecords.push({ type: 'user', message: { content: '<command-name>mattpocock-skills:ask-matt</command-name>' } });
+  }
+  const genuineText = '請接手目前 PDF 批次命名專案';
+  writeJsonl(filePath, [...noiseRecords, { type: 'user', message: { content: genuineText } }]);
+
+  const originalOpenSync = fsForTests.openSync;
+  let openCount = 0;
+  fsForTests.openSync = function (...args) {
+    openCount += 1;
+    return originalOpenSync.apply(fsForTests, args);
+  };
+  try {
+    const records = readExpandingHeadRecords(filePath, claudeUserMatchersForTest);
+    assert.ok(openCount > 1, '找不到才需要多讀一次，此案例應觸發擴展');
+    assert.ok(records.length > 20, '應讀到超過原本固定的 20 筆窗口');
+    assert.equal(records[22].message.content, genuineText);
+  } finally {
+    fsForTests.openSync = originalOpenSync;
+  }
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCodeFile finds a real title and firstMessagePreview past the fixed 20-record window when skill-invocation noise delays the first genuine message (regression for def4a233-like sessions)', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'skill-noise-def4a233.jsonl');
+  const noiseRecords = [];
+  for (let i = 0; i < 11; i += 1) {
+    noiseRecords.push({ type: 'file-history-snapshot', i });
+    noiseRecords.push({ type: 'user', message: { content: '<command-name>mattpocock-skills:ask-matt</command-name>' } });
+  }
+  const genuineText = '請接手目前 PDF 批次命名專案';
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\pdf-project', isMeta: true, message: { content: '<local-command-caveat>...' } },
+    ...noiseRecords,
+    { type: 'user', message: { content: genuineText } },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.equal(session.firstMessagePreview, genuineText, '真實訊息在 20 筆窗口之外，展開後應找到，而非顯示無');
+  assert.equal(session.title, genuineText);
+  assert.equal(session.titleIsFallback, false);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCodeFile\'s lastMessagePreview accepts the assistant\'s final text reply as the last genuine message (conversation ended on the agent\'s turn)', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'assistant-last.jsonl');
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\proj', message: { content: '使用者的問題' } },
+    { type: 'assistant', message: { content: [{ type: 'thinking', text: '內部思考，不應被當成內容' }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: '這是助理的最終回覆，也應被視為最後一則訊息' }] } },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.equal(session.lastMessagePreview, '這是助理的最終回覆，也應被視為最後一則訊息');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanClaudeCodeFile\'s lastMessagePreview skips a trailing assistant record with no text content (thinking/tool_use only) and falls back to the last genuine text from either role', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'projects', 'proj', 'trailing-tool-use.jsonl');
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\proj', message: { content: '使用者訊息' } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: '這是有意義的助理回覆' }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } },
+  ]);
+  const session = scanClaudeCodeFile(filePath, 'C:\\Users\\sjack');
+  assert.equal(session.lastMessagePreview, '這是有意義的助理回覆');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
 test('scanClaudeCodeFile sets pathExists true when the recorded cwd directory still exists on disk', () => {
   const dir = makeTempDir();
   const realProjectDir = pathForTests.join(dir, 'real-project');
@@ -643,6 +756,42 @@ test('scanCodexFile sets firstMessagePreview/lastMessagePreview to null when eve
   const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
   assert.equal(session.firstMessagePreview, null);
   assert.equal(session.lastMessagePreview, null);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+// Regression coverage mirroring the Claude Code fixture above: Codex sessions can also carry
+// 20+ leading synthetic response_item/user records (e.g. repeated environment_context injections)
+// before the first genuine human message, which used to push it past the fixed 20-record window.
+test('scanCodexFile finds a real title and firstMessagePreview past the fixed 20-record window when synthetic noise delays the first genuine message', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-noisy.jsonl');
+  const noiseRecords = Array.from({ length: 22 }, () => ({
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>...' }] },
+  }));
+  const genuineText = '幫我修一下這個延遲很久才出現的 bug';
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-noisy', cwd: 'C:\\work\\noisy', git: {} } },
+    ...noiseRecords,
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: genuineText }] } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.equal(session.firstMessagePreview, genuineText, '真實訊息在 20 筆窗口之外，展開後應找到，而非顯示無');
+  assert.equal(session.title, genuineText);
+  assert.equal(session.titleIsFallback, false);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('scanCodexFile\'s lastMessagePreview accepts the assistant\'s final output_text reply as the last genuine message', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'sessions', 'rollout-assistant-last.jsonl');
+  writeJsonl(filePath, [
+    { type: 'session_meta', payload: { id: 'sess-assistant-last', cwd: 'C:\\work\\proj', git: {} } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '使用者的問題' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '這是助理的最終回覆，對話就此結束' }] } },
+  ]);
+  const session = scanCodexFile(filePath, new Map(), 'C:\\Users\\sjack');
+  assert.equal(session.lastMessagePreview, '這是助理的最終回覆，對話就此結束');
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 

@@ -18,3 +18,7 @@
 - [ ] 部署後在真實資料／瀏覽器上肉眼確認：找一筆內容較長的 session，展開預覽後「最後一則」確實是接近該 session 結尾的內容，而不是跟「第一則」幾乎一樣
   - 資料層級部分已完成（見 `docs/deploy-log.md` 對應條目）：直接讀取部署後的 `sessions-dashboard.html` 內嵌 `DATA`，挑一筆跨度 674 小時的真實 Codex session，`firstMessagePreview`/`lastMessagePreview` 確實是主題完全不同的兩段內容，證實 `lastMessagePreview` 真的來自對話尾端而非開頭窗口。
   - 瀏覽器上實際點擊展開、肉眼確認 UI 互動行為這部分尚未執行，維持未勾選。
+
+## 上線後修正（見 `docs/deploy-log.md` 2026-08-03 條目）
+
+實際使用後發現本票原始設計有 bug：檔頭固定讀 20 筆一次性重複用於標題擷取與 `firstMessagePreview`，遇到 skill 呼叫等雜訊會把真實訊息擠出 20 筆窗口外，導致明明有內容卻顯示「無」（真實案例 `def4a233-...`）。修正為「找不到才逐步擴大檔頭讀取窗口（20→60→180→500）」，並讓 `lastMessagePreview`（僅此欄位，不含標題與 `firstMessagePreview`）改為接受使用者或 agent 任一方的最後一則真實訊息。詳見 deploy-log 對應條目。
