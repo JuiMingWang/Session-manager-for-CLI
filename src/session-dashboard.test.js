@@ -5,11 +5,10 @@ const vm = require('node:vm');
 const {
   escapeHtml,
   embedJsonSafely,
-  normalizeGroupKey,
-  displayNameForCwd,
   buildResumeCommand,
   parseArgs,
 } = require('./session-dashboard.js');
+const { normalizeGroupKey, displayNameForCwd } = require('./adapters/shared.js');
 
 test('escapeHtml escapes the five dangerous characters', () => {
   assert.equal(
@@ -91,12 +90,12 @@ const fsForTests = require('node:fs');
 const osForTests = require('node:os');
 const pathForTests = require('node:path');
 
+const { readFirstJsonLines } = require('./adapters/shared.js');
 const {
-  readFirstJsonLines,
   extractMessageText,
   isSyntheticClaudeText,
   extractClaudeTitle,
-} = require('./session-dashboard.js');
+} = require('./adapters/claude-code.js');
 
 function makeTempDir() {
   return fsForTests.mkdtempSync(pathForTests.join(osForTests.tmpdir(), 'sdtest-'));
@@ -238,7 +237,7 @@ test('readFirstJsonLines does not corrupt a multi-byte UTF-8 character straddlin
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
-const { readLastJsonLines } = require('./session-dashboard.js');
+const { readLastJsonLines } = require('./adapters/shared.js');
 
 test('readLastJsonLines returns the last n parseable records in original (oldest-to-newest) file order, skipping blank lines', () => {
   const dir = makeTempDir();
@@ -288,7 +287,8 @@ test('readLastJsonLines does not corrupt a multi-byte UTF-8 character straddling
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
 
-const { walkJsonlFiles, scanClaudeCodeFile, scanClaudeCode } = require('./session-dashboard.js');
+const { walkJsonlFiles } = require('./adapters/shared.js');
+const { scanClaudeCodeFile, scanClaudeCode } = require('./adapters/claude-code.js');
 
 function writeJsonl(filePath, records) {
   fsForTests.mkdirSync(pathForTests.dirname(filePath), { recursive: true });
@@ -334,7 +334,7 @@ test('scanClaudeCodeFile extracts title, cwd, branch, group key from a real-shap
   assert.equal(session.titleIsFallback, false, '真實標題不應標記為退而標題');
 
   function normalizeGroupKeyForTest() {
-    const { normalizeGroupKey: fn } = require('./session-dashboard.js');
+    const { normalizeGroupKey: fn } = require('./adapters/shared.js');
     return fn('C:\\work\\my-project', 'C:\\Users\\sjack');
   }
   fsForTests.rmSync(dir, { recursive: true, force: true });
@@ -392,7 +392,7 @@ test('scanClaudeCodeFile sets firstMessagePreview/lastMessagePreview to null whe
 // before the first genuine human message appears, so a session with 2+ skill invocations up front
 // pushes the real message past record 20 and both title and firstMessagePreview wrongly fell back
 // to null/synthetic. Mirrors the real session def4a233-683d-4e90-b52a-37aa006f5fe5.
-const { readExpandingHeadRecords } = require('./session-dashboard.js');
+const { readExpandingHeadRecords } = require('./adapters/shared.js');
 
 const claudeUserMatchersForTest = {
   isCandidate: (record) => record.type === 'user' && record.isMeta !== true,
@@ -641,7 +641,7 @@ const {
   isSyntheticCodexText,
   extractCodexTitle,
   loadCodexIndex,
-} = require('./session-dashboard.js');
+} = require('./adapters/codex.js');
 
 test('extractResponseItemText extracts input_text items only', () => {
   const payload = { content: [{ type: 'input_text', text: '幫我修一下這個 bug' }] };
@@ -735,7 +735,7 @@ test('loadCodexIndex returns an empty map when the index file does not exist', (
   assert.equal(loadCodexIndex('C:\\does\\not\\exist.jsonl').size, 0);
 });
 
-const { scanCodexFile, scanCodex } = require('./session-dashboard.js');
+const { scanCodexFile, scanCodex } = require('./adapters/codex.js');
 
 test('scanCodexFile prefers the session_index thread_name when present', () => {
   const dir = makeTempDir();
