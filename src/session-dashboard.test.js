@@ -66,8 +66,25 @@ test('buildResumeCommand single-quotes the path so $ and backtick in a real fold
 });
 
 test('parseArgs detects --quiet', () => {
-  assert.deepEqual(parseArgs([]), { quiet: false });
-  assert.deepEqual(parseArgs(['--quiet']), { quiet: true });
+  assert.deepEqual(parseArgs([]), { quiet: false, hide: null, unhide: null });
+  assert.deepEqual(parseArgs(['--quiet']), { quiet: true, hide: null, unhide: null });
+});
+
+test('parseArgs detects --hide <tool> <id>', () => {
+  assert.deepEqual(parseArgs(['--hide', 'claude-code', 'abc-123']), {
+    quiet: false, hide: { tool: 'claude-code', id: 'abc-123' }, unhide: null,
+  });
+});
+
+test('parseArgs detects --unhide <tool> <id>', () => {
+  assert.deepEqual(parseArgs(['--unhide', 'codex', 'xyz-789']), {
+    quiet: false, hide: null, unhide: { tool: 'codex', id: 'xyz-789' },
+  });
+});
+
+test('parseArgs treats --hide with a missing tool/id pair as no hide requested (never hand-typed, always machine-generated)', () => {
+  assert.deepEqual(parseArgs(['--hide']), { quiet: false, hide: null, unhide: null });
+  assert.deepEqual(parseArgs(['--hide', 'claude-code']), { quiet: false, hide: null, unhide: null });
 });
 
 const fsForTests = require('node:fs');
@@ -1023,6 +1040,7 @@ function runDashboardScript(html, controlValues = {}) {
     el.value = controlValues[id] !== undefined ? controlValues[id] : defaultValue;
     elementsById[id] = el;
   }
+  const clipboardWrites = [];
   const sandbox = {
     document: {
       createElement: makeFakeElement,
@@ -1031,7 +1049,7 @@ function runDashboardScript(html, controlValues = {}) {
         return elementsById[id];
       },
     },
-    navigator: { clipboard: { writeText() {} } },
+    navigator: { clipboard: { writeText(text) { clipboardWrites.push(text); } } },
     setTimeout,
     clearTimeout,
   };
@@ -1039,7 +1057,7 @@ function runDashboardScript(html, controlValues = {}) {
   const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
   if (!scriptMatch) throw new Error('embedded <script> not found in buildHtml output');
   vm.runInContext(scriptMatch[1], sandbox);
-  return { app: elementsById.app, elementsById };
+  return { app: elementsById.app, elementsById, clipboardWrites };
 }
 
 // Ticket 06 nests cards inside project node -> (optional path sub-node) -> time-bucket
@@ -1680,6 +1698,37 @@ test('buildHtml — 接續快速區接續按鈕的複製行為與專案樹卡片
   assert.equal(btn.textContent, '已複製✓');
 });
 
+// 隱藏按鈕：只放在專案樹卡片，接續快速區卡片刻意維持精簡（決策已定案，不加這顆按鈕）。
+test('buildHtml — 專案樹卡片有隱藏按鈕，點擊後複製含 --hide <tool> <id> 的指令到剪貼簿，並短暫顯示已複製提示', () => {
+  const sessions = [
+    {
+      tool: 'codex', id: 'hide-test-id', title: 'hide 測試', cwd: 'C:\\work\\hide-test', branch: null,
+      groupKey: 'c:/work/hide-test', displayName: 'hide-test',
+      startedAt: '2026-08-01T00:00:00.000Z', lastActiveAt: '2026-08-01T00:00:00.000Z',
+    },
+  ];
+  const html = buildHtml(sessions, { generatedAt: '2026-08-01T00:00:00.000Z', skippedCount: 0 });
+  const { app, clipboardWrites } = runDashboardScript(html, { 'range-filter': 'all' });
+  const card = findAllCards(app)[0];
+  const hideBtn = card.children.find((el) => el.tagName === 'BUTTON' && el.className === 'hide-btn');
+  assert.ok(hideBtn, '專案樹卡片應該有一顆獨立的隱藏按鈕');
+  assert.equal(hideBtn.textContent, '隱藏');
+  hideBtn.click();
+  assert.equal(hideBtn.textContent, '已複製隱藏指令✓');
+  const lastWrite = clipboardWrites[clipboardWrites.length - 1];
+  assert.ok(lastWrite.includes('--hide codex hide-test-id'), '複製的指令應該包含 --hide <tool> <id>');
+});
+
+test('buildHtml — 接續快速區的精簡卡片不含隱藏按鈕', () => {
+  const sessions = makeQuickResumeSessions();
+  const html = buildHtml(sessions, { generatedAt: '2026-08-02T12:00:00.000Z', skippedCount: 0 });
+  const { elementsById } = runDashboardScript(html, { 'range-filter': 'all' });
+  const cards = findQuickResumeCards(elementsById);
+  cards.forEach((card) => {
+    assert.ok(!card.children.some((el) => el.className === 'hide-btn'), '接續快速區卡片不應該有隱藏按鈕');
+  });
+});
+
 // Ticket 08 — 訊息預覽功能：卡片上可點擊展開/收起的預覽切換，套用在專案樹與接續快速區兩邊。
 function findByClassName(el, cls) {
   if ((el.className || '').split(' ').indexOf(cls) !== -1) return el;
@@ -1963,5 +2012,163 @@ test('main deduplicates a session whose jsonl file exists under two different pr
   const data = JSON.parse(dataMatch[1].replace(/\\u003c/g, '<').replace(/\\u003e/g, '>'));
   assert.equal(data.sessions.length, 1);
   assert.equal(data.sessions[0].title, '這是搬家後的新路徑版本', 'must keep the more recently active copy');
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+// 隱藏清單：使用者透過儀表板的「隱藏」按鈕複製 --hide 指令、貼到終端機執行，寫入這份
+// 本地清單，跟真實 .jsonl 檔案完全無關，純粹是這個儀表板下次產生頁面時要跳過哪些
+// session 的顯示過濾清單，可隨時透過刪除清單裡的項目或 --unhide 復原。
+const {
+  loadHiddenList,
+  saveHiddenList,
+  hideSession,
+  unhideSession,
+  filterHiddenSessions,
+} = require('./session-dashboard.js');
+
+test('loadHiddenList returns an empty array when the file does not exist', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'hidden.json');
+  assert.deepEqual(loadHiddenList(filePath), []);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('loadHiddenList returns an empty array when the file is malformed JSON, instead of crashing', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'hidden.json');
+  fsForTests.writeFileSync(filePath, '{ not valid json', 'utf8');
+  assert.deepEqual(loadHiddenList(filePath), []);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('loadHiddenList returns the parsed array when the file holds a valid list', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'hidden.json');
+  saveHiddenList(filePath, [{ tool: 'claude-code', id: 'abc' }]);
+  assert.deepEqual(loadHiddenList(filePath), [{ tool: 'claude-code', id: 'abc' }]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('hideSession creates the list file with one entry when it does not exist yet', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'hidden.json');
+  hideSession(filePath, 'claude-code', 'abc');
+  assert.deepEqual(loadHiddenList(filePath), [{ tool: 'claude-code', id: 'abc' }]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('hideSession does not add a duplicate entry when called twice with the same tool+id', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'hidden.json');
+  hideSession(filePath, 'claude-code', 'abc');
+  hideSession(filePath, 'claude-code', 'abc');
+  assert.deepEqual(loadHiddenList(filePath), [{ tool: 'claude-code', id: 'abc' }]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('hideSession treats the same id under a different tool as a distinct entry', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'hidden.json');
+  hideSession(filePath, 'claude-code', 'same-id');
+  hideSession(filePath, 'codex', 'same-id');
+  assert.deepEqual(loadHiddenList(filePath), [
+    { tool: 'claude-code', id: 'same-id' },
+    { tool: 'codex', id: 'same-id' },
+  ]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('unhideSession removes a matching entry and leaves the rest untouched', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'hidden.json');
+  saveHiddenList(filePath, [
+    { tool: 'claude-code', id: 'a' },
+    { tool: 'codex', id: 'b' },
+  ]);
+  unhideSession(filePath, 'claude-code', 'a');
+  assert.deepEqual(loadHiddenList(filePath), [{ tool: 'codex', id: 'b' }]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('unhideSession is a no-op when the entry is not present', () => {
+  const dir = makeTempDir();
+  const filePath = pathForTests.join(dir, 'hidden.json');
+  saveHiddenList(filePath, [{ tool: 'codex', id: 'b' }]);
+  unhideSession(filePath, 'claude-code', 'not-there');
+  assert.deepEqual(loadHiddenList(filePath), [{ tool: 'codex', id: 'b' }]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('filterHiddenSessions excludes only sessions matching a (tool, id) pair in the hidden list', () => {
+  const sessions = [
+    { tool: 'claude-code', id: 'a' },
+    { tool: 'codex', id: 'a' },
+    { tool: 'claude-code', id: 'b' },
+  ];
+  const hidden = [{ tool: 'claude-code', id: 'a' }];
+  const result = filterHiddenSessions(sessions, hidden);
+  assert.deepEqual(result, [{ tool: 'codex', id: 'a' }, { tool: 'claude-code', id: 'b' }]);
+});
+
+test('main --hide writes the entry to the hidden list and excludes it from the regenerated dashboard, without opening the browser', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const codexHomeDir = pathForTests.join(dir, 'codex-home-missing');
+  const filePath = pathForTests.join(claudeHomeDir, 'projects', 'proj', 'session-to-hide.jsonl');
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\proj', message: { content: '這筆待會要被隱藏' } },
+  ]);
+
+  let browserOpened = false;
+  const result = main(
+    ['--hide', 'claude-code', 'session-to-hide'],
+    { claudeHomeDir, codexHomeDir, openBrowser: () => { browserOpened = true; } }
+  );
+
+  assert.equal(browserOpened, false, '--hide 不應該開啟瀏覽器');
+  assert.equal(result.sessionCount, 0, '被隱藏的 session 不應該出現在結果中');
+  assert.equal(result.hiddenCount, 1);
+  const hiddenListPath = pathForTests.join(claudeHomeDir, 'session-dashboard-hidden.json');
+  assert.deepEqual(loadHiddenList(hiddenListPath), [{ tool: 'claude-code', id: 'session-to-hide' }]);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('main excludes a session already present in a pre-existing hidden list on a normal scan run', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const codexHomeDir = pathForTests.join(dir, 'codex-home-missing');
+  const filePath = pathForTests.join(claudeHomeDir, 'projects', 'proj', 'already-hidden.jsonl');
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\proj', message: { content: '這筆已經被隱藏了' } },
+  ]);
+  const hiddenListPath = pathForTests.join(claudeHomeDir, 'session-dashboard-hidden.json');
+  saveHiddenList(hiddenListPath, [{ tool: 'claude-code', id: 'already-hidden' }]);
+
+  const result = main(['--quiet'], { claudeHomeDir, codexHomeDir, openBrowser: () => {} });
+  assert.equal(result.sessionCount, 0);
+  assert.equal(result.hiddenCount, 1);
+  fsForTests.rmSync(dir, { recursive: true, force: true });
+});
+
+test('main --unhide removes the entry and the session reappears in the regenerated dashboard', () => {
+  const dir = makeTempDir();
+  const claudeHomeDir = pathForTests.join(dir, 'claude-home');
+  const codexHomeDir = pathForTests.join(dir, 'codex-home-missing');
+  const filePath = pathForTests.join(claudeHomeDir, 'projects', 'proj', 'to-unhide.jsonl');
+  writeJsonl(filePath, [
+    { type: 'user', cwd: 'C:\\work\\proj', message: { content: '這筆之前被隱藏，現在要復原' } },
+  ]);
+  const hiddenListPath = pathForTests.join(claudeHomeDir, 'session-dashboard-hidden.json');
+  saveHiddenList(hiddenListPath, [{ tool: 'claude-code', id: 'to-unhide' }]);
+
+  let browserOpened = false;
+  const result = main(
+    ['--unhide', 'claude-code', 'to-unhide'],
+    { claudeHomeDir, codexHomeDir, openBrowser: () => { browserOpened = true; } }
+  );
+
+  assert.equal(browserOpened, false, '--unhide 不應該開啟瀏覽器');
+  assert.equal(result.sessionCount, 1, '復原後這筆應該重新出現在結果中');
+  assert.deepEqual(loadHiddenList(hiddenListPath), []);
   fsForTests.rmSync(dir, { recursive: true, force: true });
 });
