@@ -1,4 +1,41 @@
 
+## 2026-08-05T09:52:07Z
+- 實作 `docs/design/2026-08-05-protocol-handler-resume-action.md`（`sessdash://` 協議新增第三個 action `resume`，讓「複製續接指令」按鈕也能省略複製貼上）。這次的設計過程包含**在真機上做即時實測**，不是憑推理決定機制：
+  - 最初設計打算直接 `spawn('powershell.exe', ...)`、刻意避開 `cmd.exe /c start`（理由：cmd.exe 對特殊字元的解析風險）。**實測發現這個判斷是錯的**：直接 spawn + `stdio:'ignore'`（或預設 `'pipe'`）會讓 PowerShell 行程在 2 秒內自己消失，`-NoExit` 救不回一個「認定輸入已經 EOF」的互動迴圈；改用 `cmd.exe /c start` 才能真的開出存活、可互動的視窗。第一次實測時因為 Bash heredoc 把測試腳本裡的雙反斜線吃成單反斜線（誤判成「cmd.exe corrupted 路徑」），這個誤判在使用者的真實終端機上留下一則 `Set-Location : 找不到 'C:Userssjack' 路徑` 的錯誤訊息（使用者當場看到並回報），事後改用 Write 工具（非 heredoc）重新乾淨地測試才確認是自己測試腳本的 bug，不是 cmd.exe 的問題。
+  - codex-peer-review 第 2 輪指出：`cmd.exe` 對「已定義」的環境變數（如 `%USERNAME%`）就算包在雙引號裡也會展開，即使透過 Node 的 argv 陣列傳參也一樣——實測確認一個路徑名稱字面含有 `%USERNAME%` 的 `cwd` 真的被展開成真實使用者名稱。改用 `-EncodedCommand`（UTF-16LE Base64）取代 `-Command` 傳純文字，讓 `cmd.exe` 那一層沒有任何字元可以誤判，重新實測確認修正有效。
+  - codex-peer-review 第 1 輪另外指出兩點：`Set-Location` 找不到路徑時是非終止性錯誤，後面的 `claude --resume`/`codex resume` 仍會誤跑——加上 `-ErrorAction Stop` 修正（新函式 `buildResumeCommandForProtocol`，不動既有已審查的 `buildResumeCommand`）；`id` 允許清單容許以連字號開頭（如 `--help`）被下游 CLI 誤判成選項旗標——收緊為「開頭必須是英數字」。
+  - 3 輪 codex-peer-review（`gpt-5.6-sol`/`high`）後 APPROVED，文件已蓋上核准標記。
+- 實作：`resumeSession`（新的 `spawn` 依賴注入）、`parseAndValidateProtocolUri` 新增 `resume` 分支（`cwd` 必要參數、`SAFE_RESUME_ID_PATTERN` 嚴格允許清單）、`handleProtocolUri` 新增 dispatch 分支、`main()` 新增可注入的 `options.spawnResumeFn`、前端 `buildResumeUri` + 「複製續接指令」按鈕改用既有的 `triggerProtocolAction`。**不需要重新 `--register-protocol`**——登錄檔裡的命令本來就是通用的 `--handle-uri "%1"`，不綁定特定 action。
+- 測試：新增 14 筆（`buildResumeCommandForProtocol` 跳脫規則、`resume` URI 驗證的合法/各種拒絕分支含 CLI 選項劫持防護、`resumeSession` 的 spawn 參數與 `unref`/錯誤記錄、`handleProtocolUri`/`main --handle-uri` 的 resume 端到端、前端按鈕協議連結），225 → 239 全數通過。
+- 部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，`diff` 確認逐位元組相符，`node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。
+- **尚未完成、刻意留給使用者**：設計文件裡列的手動驗證步驟（點擊「複製續接指令」按鈕、確認瀏覽器協議確認視窗、確認真的開出可互動的 PowerShell 視窗且 cd 到正確資料夾、對 `pathExists:false` 的 session 確認 `Set-Location` 失敗後不會誤跑續接指令、token 錯誤時不開視窗）——理由跟上一輪一致：需要真人點擊與肉眼判斷。
+- 尚未 commit。
+
+## 2026-08-04T17:22:15Z
+- 實作 `docs/design/2026-08-04-protocol-handler-for-hide-rename.md`（`sessdash://` 自訂 URL 協議，取代隱藏/改名按鈕原本「複製指令→貼到終端機」的手動步驟）：新增 `--handle-uri`／`--register-protocol`／`--unregister-protocol` 三個 CLI 模式、權杖建立與只讀讀取（`loadOrCreateProtocolToken`/`loadProtocolTokenIfExists`）、嚴格 URI 驗證管線（`parseAndValidateProtocolUri`）、登錄檔所有權標記機制（`registerProtocolHandler`/`unregisterProtocolHandler`）、`findClaudeSessionFilePath` 的多複本挑選邏輯（挑 `lastActiveAt` 最新且未損毀的候選）、前端 `triggerProtocolAction`（協議導覽與剪貼簿複製互不依賴）。經過 7 輪 codex-peer-review（`gpt-5.6-luna`/`xhigh`，審查當時的模型設定），文件已蓋上 `codex-peer-reviewed` 核准標記。
+- 測試：225 全數通過（含這次新增涵蓋 token 建立/讀取、URI 驗證各種拒絕分支、`--handle-uri` 端到端、多複本改名、登錄檔 register/unregister 各種所有權情境、前端點擊 DOM 行為的完整測試）。
+- 部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js` ＋ `cp src/adapters/*.js ~/.claude/scripts/adapters/`，部署後檔案與 repo 內 `src/` 逐位元組相符（`diff` 確認）。`node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0（部署後的一般掃描流程仍正常）。
+- 註冊協議：`node ~/.claude/scripts/session-dashboard.js --register-protocol` exit code 0。用 `reg query "HKCU\Software\Classes\sessdash"` 與 `reg query "HKCU\Software\Classes\sessdash\shell\open\command"` 直接查詢登錄檔驗證：`SessionDashboardOwner` 標記值存在且內容正確、`URL Protocol` 空字串標記存在、`shell\open\command` 內容為 `"C:\Program Files\nodejs\node.exe" "C:\Users\sjack\.claude\scripts\session-dashboard.js" --handle-uri "%1"`——確認指向的是部署路徑，不是 repo 路徑，對應設計文件手動驗證清單第 1、8 步。
+- **尚未完成、刻意留給使用者**：設計文件手動驗證清單第 2–7 步（實際點擊儀表板上的隱藏/改名按鈕、確認瀏覽器跳出協議確認視窗、確認寫入真的生效、token 錯誤時的拒絕行為、多複本改名寫對顯示中的那份、`--unregister-protocol` 後協議失效）。這幾步需要真人點擊瀏覽器與 Windows 原生「是否開啟外部程式」確認視窗，屬於瀏覽器自動化不應觸發的阻斷式對話框，且「畫面上是否正確反映」本身需要使用者肉眼判斷，故不由本次自動化執行。
+- 尚未 commit（`src/session-dashboard.js`、`src/session-dashboard.test.js`、`src/adapters/*.js`、`docs/deploy-log.md`、新增的 `docs/design/2026-08-04-protocol-handler-for-hide-rename.md` 皆待使用者確認後才提交）。
+
+## 2026-08-03T15:05:00Z
+- 使用者在真實儀表板上發現一筆 Codex session 的「開始」「最後」訊息預覽都顯示一段系統內部文字（Codex 自動核准／審查子迴圈重播自己的 tool-call 歷史紀錄給自己看的「transcript delta」），不是真人與 agent 的自然語言對話，並詢問能否用「規則」而非硬記字串來分辨。
+- 第一版修正：在共用的 `looksLikeInjectedDocument`（`src/adapters/shared.js`）加上「連續 2 筆以上 `[數字] 標籤:` 格式的編號 log 行」這個結構性特徵，理論依據是使用者提供的截圖片段裡看起來像重複出現的 tool-call log。**部署後用真實資料驗證，發現這個假設是錯的**：直接搜尋真實產生的 `sessions-dashboard.html`，`TRANSCRIPT DELTA START` 字樣仍然存在，追出 3 筆真實符合的 session，其中 2 筆的內容是 `<no retained transcript delta entries>`（完全沒有任何編號 log 行），第 3 筆也只有 1 行——沒有一筆真的符合「連續 2 筆以上」的假設，代表這個規則對真實資料完全沒有效果。
+- 修正為以真實資料為準：三筆真實案例唯一共同、不變的特徵是文字中間那行固定的 `>>> TRANSCRIPT DELTA START` 橫幅標記，跟後面接了 0 筆、1 筆還是 3 筆 log 完全無關。改用這個橫幅標記本身做判斷依據，並在程式註解與測試裡明確記錄「先前以為的『重複出現多次』假設被真實資料推翻」，避免以後又走回同一個錯誤假設。
+- 測試：更新/新增涵蓋 3 種真實觀察到的形狀（0 筆、1 筆、3 筆 log 條目皆需被判定為 synthetic）、一個「只有 1 個中括號數字引用的正常長訊息不應被誤判」的反例測試、以及一個貼近真實資料形狀（0 筆 log 條目）的 `scanCodexFile` 端到端回歸測試。155 → 仍是 155（本次是修正既有新測試斷言與實作，不是單純新增）。
+- 部署：`cp src/adapters/*.js ~/.claude/scripts/adapters/`，`node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。**用真實資料直接驗證**（不只是相信測試通過）：對重新產生的 `sessions-dashboard.html` 做字串搜尋，確認 `TRANSCRIPT DELTA START` 字樣完全消失，這 3 筆 session 現在改用既有的「退而標題」與訊息預覽「（無）」占位邏輯，不再顯示系統內部文字。
+
+## 2026-08-03T14:20:00Z
+- 使用者反映兩個痛點：(1) 隱藏只能一筆一筆複製指令貼到 PowerShell 執行，麻煩；(2) 隱藏後畫面不會即時反映，過去要手動重新整理頁面才看得到效果，並詢問「即時更新」是否代表需要背景輪詢、會不會很耗效能。
+- 澄清並確認方案：即時更新不需要輪詢監控，改用「按下才觸發、純前端」的樂觀更新即可，效能成本為零；使用者選擇方案一（批次選取＋前端樂觀立即隱藏），維持現有「跑一次就結束、無常駐程式」的架構，不採用常駐本機伺服器方案。
+- 後端：`parseArgs` 的 `hide`/`unhide` 從單一物件改成陣列，改用 `collectFlagPairs()` 掃描 argv 裡所有 `--hide`/`--unhide` 出現位置，一次指令可重複多組 `--hide <tool> <id>` 批次隱藏多筆。`main()` 依序對陣列裡每一筆呼叫 `hideSession`/`unhideSession`。
+- 前端：每張專案樹卡片新增批次選取勾選框（`selectedForHide` Map，跨 `render()` 重新渲染仍保留勾選狀態，因為 DOM 節點本身每次都會被整個重建）；`#controls` 下方新增「已選取 N 筆／隱藏已選取」列，點擊後複製一段組合指令（重複多組 `--hide tool id`）到剪貼簿，貼到 PowerShell 執行一次即可讓多筆同時持久化。單筆既有的「隱藏」按鈕與新的批次按鈕都改成點擊後**立即從畫面移除**對應卡片（含接續快速區），不用等待複製的指令實際被執行、也不用重新整理頁面——純前端操作 `DATA.sessions` 陣列後重新呼叫既有 `render()`/`renderQuickResume()`，沒有新增任何伺服器或輪詢機制。
+- 誠實記錄取捨：畫面「立即隱藏」跟「實際寫入 `session-dashboard-hidden.json`」之間仍有一個手動步驟落差（貼上指令到 PowerShell 執行）——如果使用者忘記執行，下次重新產生的儀表板不會保留這次的隱藏，這跟原本單筆隱藏的既有限制一致，不是這次新增的風險，只是現在批次也適用同一個限制。
+- 測試基礎設施修正：測試用的 fake DOM（`makeFakeElement`）原本沒有 `innerHTML` setter，`element.innerHTML = ''` 在測試環境是無效操作（真實瀏覽器會清空子節點，測試 stub 不會）——因為過去沒有測試會讓 `render()`/`renderQuickResume()` 在同一次測試裡執行兩次。這次樂觀更新會重新呼叫這兩個函式，因此補上 `Object.defineProperty` 讓 `innerHTML = ''` 真的清空 `children`，否則卡片會在測試裡重複累積而非被替換。
+- 測試：新增 8 筆（`parseArgs` 批次收集、`main()` 一次隱藏多筆整合測試、勾選框計數更新、批次隱藏複製組合指令＋立即移除、未勾選時點擊無作用、單筆隱藏立即移除、接續快速區同步排除），145 → 152 全數通過。
+- 部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js` ＋ `cp src/adapters/*.js ~/.claude/scripts/adapters/`（沿用上次修正後的「複製檔案本身、不用 cp -r 複製目錄」做法，避免重蹈覆轍），`node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。已用預設瀏覽器開啟真實儀表板讓使用者自行檢查勾選框／批次隱藏列／點擊後立即消失的畫面效果（Claude in Chrome 本次仍未連線，無法自動截圖驗證，肉眼確認留給使用者）。
+
 ## 2026-08-02T07:30:58Z
 - Deployed session-dashboard.js and sessions.md to ~/.claude/
 - Ran install-session-dashboard-hooks.js — appended SessionStart hooks to ~/.claude/settings.json and ~/.codex/hooks.json (existing pet-companion / Clawd on Desk entries preserved, verified by direct inspection)
@@ -34,6 +71,13 @@
 - 測試數：76 → 78（全部通過，無既有測試被破壞）。
 - 已同步部署：`cp src/session-dashboard.js ~/.claude/scripts/session-dashboard.js`，重新執行 `node ~/.claude/scripts/session-dashboard.js --quiet` exit code 0。字串檢查確認產出的 `sessions-dashboard.html` 內 `titleIsFallback":true` 出現 80 次、`titleIsFallback":false` 出現 198 次（共 278 筆 session，約 29% 退而標題，與先前記錄的 28% 量測值相符），`title-fallback` class 定義與套用邏輯皆存在。
 - 尚未完成：肉眼瀏覽器 QA（ticket 最後一項勾選項）——本次刻意維持 `--quiet` 不開瀏覽器（任務指示不可開瀏覽器操作真實資料），故該項留待使用者或下次工作階段人工確認灰階斜體樣式的實際渲染效果。
+
+## 2026-08-03T13:10:00Z
+- 使用者反映「已跳過 N 個異常檔案」只有總數看不出是哪一筆，需要自行到 ~/.claude/projects 或 ~/.codex/sessions 底下大海撈針。實作 skippedDetails：`scanClaudeCode`/`scanCodex` 的 catch 區塊改用新增的 `shared.js` 共用函式 `buildSkippedDetail(tool, filePath, err)`，回傳 `{tool, filePath, reason, rawPreview, sizeBytes, mtime}`；`reason` 直接用 `err.message`（不額外分類，保留原始診斷資訊）；`rawPreview` 是 `readRawPreviewBytes()` 讀取檔案開頭 300 bytes 的「盡力而為」文字（`toString('utf8')` 對非法位元組寬鬆轉換，不拋錯）——這份檔案本來就沒通過 JSON 解析，不再嘗試把它當合法內容解讀，只給使用者殘存文字片段自行比對。`main()` 合併兩來源的 `skippedDetails` 陣列傳給 `buildHtml`，前端在 `#skipped-warning` 下方新增 `#skipped-details` 容器，沿用既有 `createPreviewToggle` 的展開/收合模式（`.preview-toggle`/`.preview-body`）逐筆渲染路徑／原因／檔案時間／可展開的原始內容預覽。
+- 安全性：`rawPreview` 是檔案原始內容，理論上可能剛好含有 `</script>` 之類的字串；新增專門的回歸測試驗證 `embedJsonSafely` 的既有跳脫機制（`<`/`>` 轉義）在這個新欄位上依然有效，不會跳脫出內嵌的 `<script>` 區塊。
+- 測試：新增 10 筆（`readRawPreviewBytes`/`buildSkippedDetail` 單元測試、`scanClaudeCode`/`scanCodex` 的 skippedDetails 結構測試、main() 端到端聚合測試、前端展開清單 DOM 測試、XSS 回歸測試），134 → 145 全數通過。
+- **部署時意外發現一個真實的 `cp -r` 語意 bug**：部署指令沿用先前規劃的「`cp -r src/adapters ~/.claude/scripts/adapters`」，但因為 `~/.claude/scripts/adapters` 這個目錄本來就已經存在（先前模組化那次部署留下的），`cp -r` 在目的地目錄已存在時，會把來源目錄整個複製到目的地「裡面」形成 `adapters/adapters/*.js`，而不是覆蓋目的地既有的檔案——導致 `~/.claude/scripts/adapters/claude-code.js` 等三個檔案仍是模組化那次的舊版（沒有 `skippedDetails`），實際執行 `node ~/.claude/scripts/session-dashboard.js --quiet` 立即因為 `claudeResult.skippedDetails is not iterable` 而 crash（exit code 1，真實錯誤，非測試模擬）。修正方式：改用 `cp src/adapters/*.js ~/.claude/scripts/adapters/`（複製檔案本身、不複製目錄），並先 `rm -rf` 清掉這次意外產生的巢狀 `adapters/adapters/`。重新執行後 exit code 0，真實資料 285 筆 session、0 筆跳過（本機目前沒有損毀檔案，`skippedDetails` 正確回傳空陣列，不是沒被觸發到的死路徑）。**後續每次部署都要注意這個地雷**：只要 `~/.claude/scripts/adapters/` 已存在，就不能再用 `cp -r <來源目錄> <目的地目錄>` 這種形式，必須複製目錄「內容」而非目錄本身。
+- 另外用一份人工建構的真實故障 fixture（一個內容為純文字、非 JSON 的 Claude Code session 檔＋一個模擬中途截斷寫入的 Codex session 檔）跑過 `main()` 全流程，確認 `sessionCount: 1`／`skippedCount: 2`，並用預設瀏覽器開啟產生的 HTML 做視覺檢查（Claude in Chrome 擴充功能本次未連線，僅能靜態開啟不能自動化截圖點擊，故展開/收合互動已由 DOM 測試涵蓋，未另外肉眼確認點擊行為）。
 
 ## 2026-08-02T15:28:30Z
 - 實作 ticket 02（失效路徑可靠性標記）：`scanClaudeCodeFile`／`scanCodexFile` 新增 `pathExists: boolean` 欄位，各自對記錄的專案路徑（Claude Code 是 `effectiveCwd`，Codex 是 `cwd`）執行一次 `fs.existsSync`，逐筆檢查、無快取或去重批次機制（依 ticket 明確要求，不做效能優化）。`buildHtml` 的 `renderCard` 在 `pathExists === false` 時：卡片 class 追加 `card-path-missing`（CSS 設為 `filter: grayscale(1); opacity: 0.7`，整體降對比但仍完全可見可點擊）、並在標題下方插入一個「資料夾已不存在」警告文字 div（新增 `.path-missing-warning` class，紅字加粗）；複製接續指令按鈕維持不變、不隱藏不停用，符合「歷史紀錄保留、不隱藏」的既定原則。
