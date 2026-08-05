@@ -83,7 +83,9 @@
 
 ## 規劃二：新增 Antigravity 支援
 
-### 可行性結論（已驗證，非假設）
+> **本節於 2026-08-03 第二次修訂**：初版規劃寫完並經過 codex-peer-review 核准後，使用者要求「先上網研究社群是否已經摸清 Antigravity 的資料結構，避免我們自己閉門造車漏掉東西」。研究＋對照真機資料庫重新驗證後，發現初版對 protobuf 欄位位置的推測有一處實質錯誤，並發現一個原本設計的安全機制在真實資料上完全不成立。以下內容取代初版的對應段落；被取代的具體理由與新舊差異，見文末〈本次修訂摘要〉。
+
+### 可行性結論（已驗證，非假設；本次追加社群交叉驗證）
 
 Google Antigravity（VS Code fork）的本機資料分散在 `~/.gemini/antigravity/` 與 `~/AppData/Roaming/Antigravity IDE/`（Electron userData，標準 VS Code fork 佈局）。逐一驗證各種資料來源後：
 
@@ -91,67 +93,103 @@ Google Antigravity（VS Code fork）的本機資料分散在 `~/.gemini/antigrav
 |---|---|---|
 | `conversations/*.pb` | 未知二進位（非 gzip/zlib/deflate，幾乎無可印字元） | **不可直接讀取**，不採用 |
 | `conversations/*.db` | 真正 SQLite（`node:sqlite` 可開），但訊息內容欄位是 protobuf BLOB | 結構可讀，內容仍需 schema |
-| `~/.gemini/antigravity/brain/<uuid>/task.md.metadata.json` | 純 JSON，`summary`／`updatedAt` | **可直接讀取**，但覆蓋率不完整（實測 4 筆對話中 1 筆缺檔） |
+| `~/.gemini/antigravity/brain/<uuid>/task.md.metadata.json` | 純 JSON，`summary`／`updatedAt` | **可直接讀取**，但覆蓋率不完整（實測 10 筆對話中 5 筆有這個檔案） |
+| `~/.gemini/antigravity/brain/<uuid>/.system_generated/logs/transcript.jsonl` | 純 JSON Lines，逐輪紀錄，`source:"USER_EXPLICIT"`＋`type:"USER_INPUT"`＋`<USER_REQUEST>` 標記包住使用者逐字輸入 | **可直接讀取，且是逐字輸入**（跟 Claude Code／Codex 的 `history.jsonl` 精神一致），但覆蓋率比 `task.md.metadata.json` 更低（實測 10 筆對話中只有 2 筆有這個檔案）；本輪不採用，留作未來訊息預覽的候選來源 |
 | `User/workspaceStorage/<hash>/workspace.json` | 標準 VS Code JSON，`folder` 欄位 | **可直接讀取**，但只列出「目前開啟過的 workspace」，不是「每筆對話對應哪個 workspace」的清單 |
-| `User/globalStorage/state.vscdb` 的 `antigravityUnifiedStateSync.trajectorySummaries` key | base64 → protobuf（無官方 schema，UI 內部同步用） | **可讀取** —— 用自寫的 schema-less protobuf wire-format walker 解出，實測對 ~10 筆真實對話都能拿到一致的欄位編號：對話 UUID（depth1/field1）、workspace 資料夾 URI（depth4/field7，例如 `file:///c:/Users/sjack/OneDrive/Documents/ffmpeg功能化`）、標題文字（depth3/field1） |
+| `User/globalStorage/state.vscdb` 的 `antigravityUnifiedStateSync.trajectorySummaries` key | base64 → protobuf（無官方 schema，UI 內部同步用） | **可讀取，且欄位位置已經社群交叉驗證＋對照真機資料庫修正**（見下一節） |
 
-**確切讀取路徑（端到端，已用真實檔案驗證過，不是抽象描述）**：`state.vscdb` 是標準 SQLite 檔案，用 `SELECT value FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.trajectorySummaries'` 取出一筆列；這個 `value` 欄位本身存的是 **文字型別、內容為 base64 字串**（不是原始 bytes），要先 `row.value.toString('utf8')` 拿到 base64 字串，再 `Buffer.from(base64Str, 'base64')` 才會得到真正的 protobuf bytes，之後才餵進 walker。這條路徑（SQL 查詢字串、`ItemTable`/`key`/`value` 欄位名稱、value 是「文字包 base64」而非直接 blob）在這次規劃前已經用真實資料庫實測過，不是憑空假設的 schema。
+**社群交叉驗證**：GitHub 上已有人針對這個資料格式做過獨立逆向工程並公開 `.proto` schema——[`ag-donald/Antigravity-Database-Manager`](https://github.com/ag-donald/Antigravity-Database-Manager)（`docs/schema.proto`）記錄了 `TrajectorySummary`／`TrajectoryPayload`／`WorkspaceInfo` 的欄位編號，[`winters27/google-antigravity-export`](https://github.com/winters27/google-antigravity-export) 則走另一條路（連 Antigravity 執行中的本機 HTTP API，呼叫 `GetAllCascadeTrajectories`），需要 Antigravity 正在執行，跟本專案「離線掃描靜態檔案」的既定設計方向不同，本輪不採用，僅供未來參考。拿這份社群 schema 對照這台機器真實的 `state.vscdb` 逐欄位重新解碼後，**確認初版規劃裡的「depth4/field7 = workspace URI」是錯的**（見下一節修正版）。
 
-**結論：Antigravity 對話 → 專案資料夾的對應關係可以取得**，解決了先前認定的阻斷性缺口（沒有這層對應，就只能全部落在雜項）。
+### 修正後的欄位結構（已對照社群 schema＋真機資料重新驗證）
 
-### 這一輪的抓取範圍（刻意縮小，降低風險）
+**關鍵修正：中間多了一層先前完全沒發現的 base64 包裝。** 完整路徑：
 
-`trajectorySummaries` 是 Google 內部 UI 狀態同步用的私有格式，沒有公開文件，欄位編號可能在任何一次更新後改變且不會事先通知 —— 跟 Claude Code／Codex 的 JSONL 格式（穩定、廣泛使用、社群已驗證過）风险量级不同。因此這次只從這個來源抓**兩個**欄位，且都有可驗證的固定格式：
+1. `state.vscdb` 的 `value` 欄位（文字型別）→ `Buffer.from(value, 'base64')` → 外層 protobuf bytes（此步驟初版就有，沒有變）。
+2. 外層 protobuf：`repeated TrajectorySummary entries = field 1`。每筆 `TrajectorySummary` 只有兩個欄位：`field 1`＝對話 UUID（字串）、`field 2`＝**又是一段 base64 字串**（不是直接的巢狀 protobuf bytes！這是初版完全沒發現的一層）。
+3. 把 `field 2` 的 bytes 當 UTF-8 文字讀出來，**再做一次** `Buffer.from(str, 'base64')`，才會拿到真正的 `TrajectoryPayload` protobuf bytes。
 
-- **對話 UUID**（depth1/field1）：驗證方式有兩層，不只是「長得像 UUID」——(a) 符合 UUID 正規表示式；(b) **必須能在 `conversations/` 目錄下找到同名檔案**（實測確認該目錄下的檔名就是 `<uuid>.pb` 或 `<uuid>.db`，例如 `156aeb2b-3f2c-41b2-9037-9b813b58d97b.pb`）。只符合格式但目錄下找不到對應檔案的項目視為解析失敗、整筆丟棄——這一層是against「格式編號被 Google 換掉、solved 剛好又解出另一個合法 UUID 但語意已經錯了」這種格式檢查本身防不住的情況：真正的 trajectory 一定會有對應的實體檔案，混淆到別的欄位則幾乎不可能剛好對到一個真實存在的檔名。
-- **workspace 資料夾 URI**（depth4/field7）：不是「以 `file:///` 開頭就好」，而是明確的轉換＋驗證步驟：(1) 必須整體符合 `^file:\/\/\/[a-zA-Z](:|%3[Aa])\//` 這種「磁碟機代號開頭」的形狀（能排除大部分非路徑的文字誤判）；(2) 去掉 `file:///` 前綴後對剩餘部分做 `decodeURIComponent`（同時處理磁碟機代號本身可能是 `c:` 或 `c%3A` 兩種寫法，以及資料夾名稱中的中文／符號百分比編碼），解碼失敗（例如截斷的 `%` 序列）視為驗證失敗；(3) 解碼後的字串（例如 `c:/Users/sjack/OneDrive/Documents/ffmpeg功能化`）直接可以餵給既有的 `normalizePath`／`normalizeGroupKey`／`displayNameForCwd`——這三個函式本來就把反斜線／正斜線視為等價（`replace(/\\/g, '/')`），所以不需要額外轉成反斜線，Node 的 `fs.existsSync` 在 Windows 上也接受正斜線路徑。
+`TrajectoryPayload` 已驗證的欄位（對照這台機器全部 8 筆真實資料，欄位位置 100% 一致）：
 
-  **殘留風險、單筆結構指紋比對、與整批一致性檢查（三層防禦，取代原本只有 canary 一層）**：光靠「URI 形狀＋解碼」與整批比例，仍防不住 codex 在第三輪指出的情況——欄位編號整體位移後，新位置上剛好普遍（甚至每一筆）都長得像合法且存在的路徑，這時比例門檻會誤判成「格式沒變」而全部接受。要真正把這個風險壓低，不能只看單一欄位或事後統計，必須在**單筆記錄內部**驗證「這是不是原本就認得的那個結構」，而不只是「這個值長得像不像 URI」：
-  1. **單筆結構指紋比對（record-level structural fingerprint，主要防線）**：實測 ~10 筆真實 trajectory 得到的不只是 depth4/field7 這一個欄位，而是一組**同時存在、彼此固定**的欄位樣板——depth1/field1 是 UUID 形狀的文字、depth3/field1 是像標題的自由文字、depth3/field4 是另一個 UUID 形狀的文字、depth4/field7 是 URI 形狀的文字，四者出現在同一筆記錄的固定巢狀位置。驗證改成要求**這四個欄位同時符合各自預期的形狀**才採信這筆記錄的任何欄位（不只是驗證 workspace URI 單獨一個欄位）；只要其中任一欄位對不上預期形狀，就判定「這筆記錄的結構樣板跟已知格式不符」，整筆記錄（UUID、標題、路徑全部）視為解析失敗、不採信、不使用。這是 fail-closed 設計：格式一旦真的位移，位移通常會同時打亂樣板裡的好幾個欄位，而不會恰好只動一個又剛好維持其餘三個不變——要求四個獨立特徵同時吻合，遠比只驗證一個欄位的巧合機率低很多。
+| 欄位 | 型別 | 內容 | 初版規劃是否正確 |
+|---|---|---|---|
+| `field 1` | string | **標題**（例如「整理並上傳專案至 GitHub」） | 位置猜對了，但初版決定「不採用」，本次修正為採用（見下） |
+| `field 3` | Timestamp `{seconds, nanos}` | created_at | 初版沒提到 |
+| `field 4` | string | 第二組 UUID（與 outer UUID 不同） | 位置猜對了 |
+| `field 7` | Timestamp `{seconds, nanos}` | updated_at | **初版誤判為 workspace URI，這是本次修正的核心錯誤** |
+| `field 9` | 巢狀訊息 `WorkspaceInfo` | 見下 | 初版完全沒發現這層巢狀 |
+| `field 10` | Timestamp | accessed_at | 初版沒提到 |
 
-     **trajectory 邊界的明確定義（先前版本遺漏，這次補上——這是正確性上的必要前提，不只是風險緩解）**：`trajectorySummaries` 這個 protobuf 值本身是「多筆 trajectory 依序排列」的頂層 repeated 結構，walker 在最外層（depth 0）逐一走訪這些 length-delimited 子區塊時，**每一個頂層子區塊就是一筆獨立的 trajectory**，其餘所有更深的欄位（depth1/field1、depth3/field1、depth3/field4、depth4/field7）都必須是「對這一個子區塊各自遞迴解析」得到的結果，不能把整個 `trajectorySummaries` 一次性攤平成一份跨越所有 trajectory 的全域 (depth, field) → 文字清單再去配對——那樣做的話，若 walker 的實作是「不分 trajectory、全域收集所有符合形狀的字串」，四個欄位很可能各自來自不同筆 trajectory（例如 A 對話的 UUID 配到 B 對話的 workspace URI），會把 session 歸類到完全不相關的專案，而且這個錯誤不會被任何格式驗證擋下（每個欄位單獨看都是合法的）。具體要求：walker 的輸出結構必須是「一個陣列，每個元素對應一筆 trajectory，內含只在該筆子區塊遞迴範圍內收集到的欄位」，四欄同時驗證的比對只能在同一個陣列元素內部進行，絕不能跨元素配對。測試計畫需新增一則「兩筆 trajectory 各自都通過結構指紋比對，但斷言 A 的 UUID 只會跟 A 自己的 URI 配對、絕不會跟 B 的 URI 配對」的 fixture 測試，直接驗證這個邊界規則。
+`WorkspaceInfo`（巢狀在 `field 9` 裡面，不是直接攤平在 `TrajectoryPayload` 底下）：
 
-     四個子檢查各自的具體規則（避免「title-shaped＝任意非空字串」這種寬鬆到沒有防護力的定義，也避免過嚴誤拒真實資料）：
-     - depth1/field1（第一個 UUID）／depth3/field4（第二個 UUID）：套用同一條 UUID 正規表示式，兩者規則完全相同、獨立各自檢查。
-     - depth4/field7（workspace URI）：套用前面已定義的「磁碟機代號開頭形狀＋`decodeURIComponent` 成功」規則。
-     - depth3/field1（標題形狀文字）：**不是「非空字串就算數」**，而是必須同時滿足 (a) `looksLikeUtf8Text(bytes)` 判斷——這段 bytes 重新編碼回 UTF-8 後要能無損還原（排除誤把二進位資料當文字），且可印字元佔比需高於 85%；(b) 解碼後的字元數落在 1～300 之間（上界比對既有 `extractClaudeTitle`/`extractCodexTitle` 120 字截斷與訊息預覽多行上限的量級，避免把一段格式錯位後湊巧解出的長篇雜訊也當成標題形狀）。**澄清這個判斷函式的來源**：`looksLikeUtf8Text` 目前只存在於這次調查用的一次性 scratch 腳本（`protobuf_walk.js`）裡，**這個 repo 的正式程式碼裡沒有這個函式，也沒有任何既有的 protobuf 解析邏輯**——因為整個 protobuf wire-format walker 本身就是這次 Antigravity adapter 要新寫的程式碼，不是「重用某個既有 repo 函式」；上面這條規則是這個新 walker 內部要實作的其中一個判斷式，其邏輯已經在 scratch 腳本上針對真實資料驗證過（對 ~10 筆真實 trajectory 有效區分文字與二進位欄位），但落地時是全新程式碼，不是既有 `isSyntheticClaudeText`／`looksLikeInjectedDocument`（這兩個是既有的、但服務於完全不同用途——過濾 JSONL 訊息內容裡的雜訊，不是判斷 protobuf 欄位是否為文字）那類函式的延伸。這個欄位**只用來當作指紋比對的其中一項獨立檢查，其值本身不會被拿來顯示**（顯示標題仍照上一段所述完全不採用這個來源，用 `task.md.metadata.json`／退而標題）——用意是多一個獨立、可證偽的形狀約束，而不是提供顯示內容。
-     - **明確承認並測試這個 fingerprint 抓不到的反例**：測試計畫需包含一則刻意建構的「假設欄位已經漂移，但漂移後在這四個位置上剛好同時產生合法 UUID／合法 UUID／合法標題形狀文字／合法且存在的 URI」fixture，斷言這種情況下 fingerprint 檢查『會』通過（也就是明確證明並記錄這個已知、無法排除的殘留風險邊界，而不是留給實作者自己猜或誤以為 fingerprint 能防住一切）——這則測試的目的是讓「殘留風險」從一句文件敘述變成一個可執行、可回歸驗證的已知邊界。
-  2. **整批一致性檢查（次要防線，抓「大部分記錄的樣板都對不上」這種明顯drift）**：同一次掃描中，統計通過「單筆結構指紋比對」的 trajectory 佔全部候選的比例；若這個比例明顯偏低（低於既有 ~10 筆真實資料驗證時觀察到的「幾乎全數通過」水準，門檻訂為低於 50%），代表格式很可能已經整體改變，判定「這次掃描的來源整體不可信」，觸發失敗安全網第 4 層的「安裝但讀取失敗」路徑：回傳 `{ sessions: [], sourceError: true, skipped: <這次掃描到的 trajectory 總筆數> }`（連原本少數通過單筆指紋比對的記錄也一併不採信、計入 `skipped`），**不會產生任何 Antigravity session、也不會有任何一筆落到雜項**——跟 Claude/Codex 既有「cwd 是家目錄本身 → 雜項」的語意是完全不同的兩件事，不能混用同一個詞彙或當作彼此的同義詞。
-  3. **誠實承認無法歸零的殘留風險**：即使加上結構指紋比對，理論上仍無法完全排除「Google 剛好把四個欄位全部搬到另一組同樣自洽、同樣格式正確的新位置」這種極端巧合——這是使用沒有官方文件的私有格式本質上無法用任何客戶端檢查證明到零風險的部分，必須誠實記錄而非假裝解決。但這個殘留風險的**實際影響是有界且可逆的**：最壞情況是某筆 Antigravity session 被歸類到錯誤的專案節點（顯示層的分類錯誤），不會造成 Claude Code／Codex 資料損毀或遺失，且使用者一旦目視發現分類錯誤，既有的「隱藏」功能可以立即讓這筆 session 不再顯示——不是一個會擴散或無法挽回的風險，值得記錄但不构成阻擋這個功能上線的理由。
+| 欄位 | 型別 | 內容 |
+|---|---|---|
+| `field 1` | string | workspace 路徑（`file:///...` URI，例如 `file:///c:/Users/sjack/OneDrive/Documents/ffmpeg功能化`）——**真正的路徑欄位在這裡，不是 `TrajectoryPayload.field 7`** |
+| `field 3` | 巢狀訊息 `GitContext` | `field 1`＝repo 名稱（例如 `JuiMingWang/pdf-field-renamer`）、`field 2`＝remote URL；資料夾不是 git repo 時這個欄位是空的（長度 0），不是缺欄位 |
+| `field 4` | string | git branch（例如 `main`）；只在資料夾是 git repo 時才有值 |
 
-     **另一種性質不同的殘留風險：整份 blob 尾端被截斷，導致最後一批 trajectory 整批默默消失（codex 第 12 輪指出，這裡誠實承認、不強行解決）**：`complete` 旗標只能偵測「單一子區塊內部」的截斷，抓不到「整個 `trajectorySummaries` 這份 repeated 清單本身在某個子區塊的正常結尾後被截斷，後面本來還有更多筆 trajectory」——因為 protobuf 的 repeated 欄位沒有明確的「清單到此結束」標記，讀到 buffer 結尾這件事，語法上完全無法區分「清單真的到此為止」跟「清單被截斷、後面遺失的部分剛好從一個子區塊的正常邊界開始」。這是這個 wire format 本身的結構性限制，不是這次設計的疏漏，也沒有辦法單靠 `trajectorySummaries` 自己的 bytes 解決。**但這個殘留風險在性質上跟其他幾層防禦要防的風險不同，嚴重程度也更低**：它造成的後果是「某些真實存在的 Antigravity session 暫時不會出現在儀表板上」（遺漏／省略），而不是「顯示出歸類錯誤或內容錯誤的 session」（誤植／顯示錯誤資料）——這正好完全符合這份文件從頭到尾採用的核心原則「寧可誠實跳過，不要悄悄顯示錯的」：跳過／不顯示，是這個系統本來就選擇的、比顯示錯誤內容更能接受的結果。此外，這個殘留風險實務上也不是新增的失敗模式：即使 `trajectorySummaries` 完全沒有損毀，Antigravity 自己的內部同步機制本身就可能落後於 `conversations/` 目錄下真實存在的對話檔案（例如剛結束、還來不及同步進這個 key 的對話）——這種「檔案存在但還沒同步進 `trajectorySummaries`」的情況，看起來跟「被截斷而遺漏」一模一樣，都是「這個工具這次沒抓到這筆 session」，屬於已知、既有、任何同步機制都無法完全避免的落後視窗，不是這次新引入的缺陷。因此這裡的處理方式是誠實記錄這個邊界（截斷偵測在協定層級無法做到，效果等同於既有的同步延遲落差），而不是嘗試發明一個無法真正解決的偵測機制。
+`GitContext`（`field 3`）解出的 repo 名稱／remote URL 本輪**不**進入 `SessionRecord` 或 UI——目前只有 `branch` 有對應的既有欄位／既有前端顯示邏輯可以沿用，repo 名稱／remote URL 沒有對應的既有欄位，硬塞會需要新的 UI 元素，超出這輪範圍；解碼出來但先不使用，留作未來如果要顯示 git 資訊時的候選欄位。
 
-**刻意不從這個來源抓「標題」欄位**（尽管 depth3/field1 實測看起來是可用的真實標題）。原因：路徑與 UUID 都有明確、可程式驗證的固定格式，格式不符就能安全判定「這欄位解析失敗」；但標題是自由文字，沒有可驗證的形狀，一旦欄位編號在未來版本位移，抓到的可能是「看起来像標題但其實是別的欄位內容」而不會被任何驗證擋下 —— 這正是最需要避免的「靜默顯示錯誤資料」情境。標題改用兩層既有、零風險的退路：
+實測這台機器 8 筆真實 trajectory：8 筆都解出標題與 workspace 路徑（100%），2 筆有 GitContext，3 筆有 branch 值——**證實初版「Antigravity 沒有 git 分支概念，`branch` 寫死 `null`」這個假設是錯的**，branch 資訊在資料夾是 git repo 時確實拿得到。
 
-1. `task.md.metadata.json` 的 `summary`（純 JSON 讀取，沒有逆向工程成分）。
-2. 上述都沒有時，比照 Claude/Codex 既有的「退而標題」機制（CONTEXT.md 定義：資料夾名稱＋時間戳記），標記為退而標題並套用既有的灰階／斜體視覺警告。
+### 一個原本設計的安全機制在真實資料上不成立，必須拿掉
 
-本輪範圍另外排除「訊息預覽」（首/末則訊息內容）——這需要解開 protobuf BLOB 裡的實際對話內容，风险與工作量都明顯高於 UUID／路徑兩個自我驗證欄位，且使用者已在先前決策中選擇「這輪先不做訊息預覽，其他都做」。
+初版規劃要求「對話 UUID 必須能在 `conversations/` 目錄下找到同名檔案，對不上就整筆丟棄」，理由是防止欄位位移後巧合解出的假 UUID。**這個假設已用真機資料證偽**：把 8 筆 trajectory 裡的三個 UUID（outer UUID、`TrajectoryPayload.field 4` 的第二組 UUID、更深層還有第三組 UUID）逐一拿去比對 `conversations/` 目錄下 10 個真實檔案的檔名——**沒有任何一筆、任何一個 UUID 對得上**。
 
-### SessionRecord 完整欄位映射（先前規劃遺漏，本次補上）
+追查可能原因：`conversations/` 目錄下 10 個檔案裡有 7 個的修改時間精確落在同一秒（微秒級差異），是典型的「批次搬移／還原」痕跡；對照社群論壇上多篇「Antigravity 未正常關機後對話紀錄遺失」「版本升級後 profile 遷移需要手動復原」的回報，這台機器的 `conversations/` 資料夾很可能經歷過一次資料復原/搬移事件，導致跟 `state.vscdb` 快取的索引不同步——這比較像是這台機器資料本身處於不一致狀態，不是官方資料模型本來就沒有這層對應。但既然**目前找不到任何一台機器可以驗證這個對應關係成立**，繼續把它當成硬性擋門的驗證條件，會讓 8 筆結構完整、內容正確的真實資料在這個檢查上全部被誤判為失敗、完全不顯示——這比「保留這 8 筆但少一層交叉驗證」的風險更糟。**決定：拿掉「UUID 必須對應到 `conversations/` 真實檔案」這個驗證條件**，其餘結構指紋比對（欄位形狀、巢狀關係、`complete` 旗標）維持不變。
 
-前端整個渲染邏輯（排序、時間範圍篩選、久未使用判定、時間區間分桶、接續快速區候選挑選）都依賴一組固定欄位形狀，先前版本只談到 `id`／`title`／`cwd` 三個核心欄位怎麼來，沒有明確定義其餘既有欄位在 Antigravity 這邊怎麼填，若漏填或填入無效值，會在既有那些依賴這些欄位的邏輯裡出現排序錯誤、`Invalid Date`、或永遠進不了久未使用區等問題。比照 `scanClaudeCodeFile`／`scanCodexFile` 既有回傳形狀，逐一定義：
+### 這一輪的抓取範圍（比初版更寬：標題本次改為採用）
+
+初版規劃「刻意不抓標題欄位」，原因是「標題是自由文字，沒有可驗證的形狀，欄位位移時抓錯也不會被任何驗證擋下」。**這個顧慮本身仍然成立**，但這次改變決定的理由是：既然已經改用「四個獨立形狀同時吻合才採信」的結構指紋比對（見下），標題欄位不再是唯一的信任依據，而是四個必須同時吻合的獨立特徵之一——只要其中任何一個位移，整筆記錄都會被判定失敗、標題也不會被採用。所以標題本次**改為抓取**，作為主要標題來源，直接顯示；若指紋比對失敗，一樣完全不採用（含標題）。
+
+抓取的欄位與對應的結構指紋比對條件：
+
+- **對話 UUID**（`TrajectorySummary.field 1`）：符合 UUID 正規表示式。
+- **第二組 UUID**（`TrajectoryPayload.field 4`）：符合同一條 UUID 正規表示式，獨立檢查。
+- **標題**（`TrajectoryPayload.field 1`）：`looksLikeUtf8Text(bytes)` 判斷（可印字元佔比需高於 85%，且能無損還原 UTF-8）＋長度落在 1～300 字元。
+- **workspace URI**（`WorkspaceInfo.field 1`，即 `TrajectoryPayload.field 9` 的巢狀內容，**不是 `field 7`**）：驗證與轉換分兩步，缺一不可——(1) 整體符合 `^file:\/\/\/[a-zA-Z](:|%3[Aa])\//` 磁碟機代號開頭形狀；(2) 驗證通過後，**去掉 `file:///` 前綴**，對剩餘部分做 `decodeURIComponent`（解碼失敗視為驗證失敗），得到的結果（例如 `c:/Users/sjack/OneDrive/Documents/ffmpeg功能化`）才是可以直接餵給 `fs.existsSync`／既有 `normalizeGroupKey`／`displayNameForCwd` 的路徑字串——這三者本來就把正斜線／反斜線視為等價，Windows 上 `fs.existsSync` 也接受正斜線路徑，不需要額外轉換。**沒有做步驟 (2)、直接把原始 `file:///...` URI 拿去用，會讓 `fs.existsSync`／`normalizeGroupKey`／`Set-Location` 全部誤判成路徑不存在**——這是一個真實會發生的實作錯誤，不是理論風險；`SessionRecord.cwd` 與所有後續測試都必須是轉換後的結果，不能是原始 URI。
+
+**單筆結構指紋比對（record-level structural fingerprint，主要防線）**：這四個欄位必須同時符合各自形狀，且巢狀關係必須正確（workspace URI 必須來自 `field 9` 巢狀展開後的 `field 1`，不能直接在 `TrajectoryPayload` 底下找形狀像 URI 的欄位），才採信這筆記錄的任何欄位；任一項不符，整筆記錄（UUID、標題、路徑全部）視為解析失敗、不採信、計入 `skipped`。這是 fail-closed 設計：格式一旦真的位移，通常會同時打亂樣板裡好幾個欄位，要求四個獨立特徵＋正確的巢狀關係同時吻合，比只驗證一兩個欄位的巧合機率低很多。
+
+**trajectory 邊界的明確定義**：`trajectorySummaries` 頂層是 `repeated TrajectorySummary`，walker 逐一走訪每個頂層子區塊時，該子區塊「自己的」`field 2`（第二層 base64）展開後得到的 `TrajectoryPayload` 才是這筆 trajectory 的欄位來源，不能把所有子區塊攤平成一份全域 (field) → 值清單再配對——否則 A 對話的 UUID 可能被誤配到 B 對話的 workspace URI，而且這個錯誤不會被任何格式驗證擋下。測試計畫需包含「兩筆 trajectory 各自通過指紋比對，但 A 的 UUID 只會跟 A 自己的 URI 配對」的 fixture 測試。
+
+**`complete` 完整度旗標**：walker 對每個頂層子區塊，除了收集欄位內容，還要回傳 `complete: boolean`——只有完整走訪到子區塊最後一個 byte、過程中從未因超界或未知 wire type 提早停止，才標記 `true`。單筆結構指紋比對把 `complete === true` 當第五個必要條件，跟四個欄位形狀一起要求同時成立。walker 本身面對垃圾／截斷輸入必須有界、不拋出未預期例外：遞迴深度有上限、讀取長度超出 buffer 剩餘長度就停止解析、遇到不支援的 wire type 就停止——最壞情況是「找不到任何合法 trajectory」，不會掛起或崩潰。
+
+**整批一致性檢查（次要防線）**：同一次掃描中，通過單筆結構指紋比對的 trajectory 佔全部候選的比例，若低於 50%（這台機器 8/8 全數通過，門檻仍訂在明顯偏低的水準），判定整個來源不可信，回傳 `{ sessions: [], sourceError: true, skipped: <總筆數> }`，不產生任何 session、也不會落到雜項。
+
+**base64 內容形狀前置檢查**：兩層 base64（外層 SQLite value、`TrajectorySummary.field 2`）都要先做 `^[A-Za-z0-9+/]*={0,2}$` 形狀檢查，不符合直接視為讀取失敗，理由同初版（`Buffer.from` 對非法字元不拋錯，必須自己擋）。
+
+**誠實承認無法歸零的殘留風險**：即使指紋比對＋巢狀關係都吻合，理論上仍無法完全排除 Google 未來把欄位搬到另一組同樣自洽的新位置。這個風險有界且可逆（最壞情況是分類到錯誤專案節點，可用既有「隱藏」功能排除），值得記錄但不構成阻擋上線的理由。`trajectorySummaries` 整份 blob 尾端被截斷、導致最後一批 trajectory 默默消失，是 protobuf repeated 欄位本身沒有「清單到此結束」標記造成的結構性限制，效果等同於既有的「Antigravity 內部同步落後於 `conversations/` 真實檔案」——只會造成遺漏，不會顯示錯誤內容，符合本文件一貫的「寧可誠實跳過」原則。
+
+本輪範圍仍然排除「訊息預覽」（首/末則訊息內容）——已知有兩個候選來源（`.system_generated/logs/transcript.jsonl` 覆蓋率 2/10、`task.md.metadata.json` 的 `summary` 覆蓋率 5/10），但都不是這次 `trajectorySummaries` 路徑的一部分，且使用者已在先前決策中選擇「這輪先不做訊息預覽，其他都做」——留作獨立的未來評估項目。
+
+### SessionRecord 完整欄位映射（本次修正 title／branch／startedAt／lastActiveAt 的來源）
+
+前端整個渲染邏輯（排序、時間範圍篩選、久未使用判定、時間區間分桶、接續快速區候選挑選）都依賴一組固定欄位形狀。比照 `scanClaudeCodeFile`／`scanCodexFile` 既有回傳形狀，逐一定義：
 
 | 欄位 | 來源 | 說明 |
 |---|---|---|
 | `tool` | 固定字串 `'antigravity'` | 新增的第三種工具值 |
-| `id` | trajectory UUID | 已定義的驗證規則見上 |
-| `cwd` | workspace URI 解碼後的路徑 | 已定義的轉換規則見上 |
+| `id` | 對話 UUID（`TrajectorySummary.field 1`） | 已定義的驗證規則見上；**不再要求對應到 `conversations/` 真實檔案**（見上一節修正） |
+| `cwd` | `WorkspaceInfo.field 1` 解碼後的路徑 | 已定義的轉換規則見上 |
 | `groupKey`／`displayName` | 套用既有 `normalizeGroupKey`／`displayNameForCwd`，輸入為上面的 `cwd` | 與 Claude/Codex 完全相同的既有函式，不需要新邏輯 |
-| `startedAt` | `fs.statSync(對應的 conversations/<uuid>.pb 或 .db 檔案).birthtime.toISOString()` | **直接比照 `scanClaudeCodeFile`/`scanCodexFile` 既有慣例**（兩者皆用檔案的 `birthtime` 當 `startedAt`），不使用 `task.md.metadata.json` 的時間戳，因為後者覆蓋率不完整（實測約 75%），而對應的實體檔案一定存在（第 3 節已定義 UUID 必須對應到實體檔案才算通過驗證） |
-| `lastActiveAt` | 同上，改用該檔案的 `mtime.toISOString()` | 同上，比照既有慣例，100% 覆蓋率，不依賴 `task.md.metadata.json` |
-| `branch` | 固定 `null` | Antigravity 沒有 git 分支概念可對應；既有前端本來就對 `s.branch` 做 falsy 檢查（`(s.branch ? '　branch：' + s.branch : '')`），`null` 是既有程式碼已經優雅處理的既定情況，不需要新增分支邏輯 |
-| `title`／`titleIsFallback` | 見上一節（`task.md.metadata.json` 的 `summary`，或退而標題） | `titleIsFallback` 依實際採用哪一層設為 `true`/`false`，比照既有欄位語意 |
-| `pathExists` | 對解碼後的 `cwd` 呼叫既有 `fs.existsSync`，跟 Claude/Codex 完全相同的檢查方式 | 沿用既有失效路徑機制，不需要新邏輯 |
-| `firstMessagePreview`／`lastMessagePreview` | 固定 `null` | 本輪明確排除訊息預覽（見上），既有前端本來就對 `null` 顯示「（無）」占位文字，不需要新增處理 |
+| `startedAt` | `TrajectoryPayload.field 3`（created_at Timestamp）解出的時間 | **本次修正**：初版打算用對應實體檔案的 `birthtime`，但既然 UUID 常常對不上真實檔案（見上），這個備援本身不可靠；`created_at` 是 payload 自帶的欄位，不依賴檔案是否存在，已驗證可正確解出 |
+| `lastActiveAt` | `TrajectoryPayload.field 7`（updated_at Timestamp）解出的時間 | 同上，改用 payload 自帶欄位，不依賴對應檔案 |
+| `branch` | `WorkspaceInfo.field 4`，不存在則 `null` | **本次修正**：初版假設「Antigravity 沒有分支概念」是錯的，實測 3/8 筆有值；沿用既有前端對 `s.branch` 的 falsy 檢查，`null` 時不需要新邏輯 |
+| `title`／`titleIsFallback` | 通過結構指紋比對時，直接用 `TrajectoryPayload.field 1`，`titleIsFallback` 固定為 `false` | **本次修正並修正一個矛盾**：初版排除這個來源，本次改為主要來源；但初版曾一併規劃「指紋比對沒過就退回 `task.md.metadata.json` 的 `summary`」，這跟「指紋比對任一項不符，整筆記錄含標題視為解析失敗、不採信」互相矛盾——指紋比對沒過代表這筆 trajectory 根本不會產生 SessionRecord，不會走到「有 session 但標題退回」這個狀態，`task.md.metadata.json` 退路因此拿掉。**這代表 Antigravity 這個來源沒有「退而標題」這一級**：指紋比對失敗＝整筆連同標題一起消失（計入 `skipped`），跟 Claude/Codex「標題退回但 session 仍存在」是不同的行為，需要在文件與 UI 說明裡交代清楚，不能誤用同一個詞彙 |
+| `pathExists` | 對解碼後的 `cwd` 呼叫既有 `fs.existsSync` | 沿用既有失效路徑機制，不需要新邏輯 |
+| `firstMessagePreview`／`lastMessagePreview` | 固定 `null` | 本輪仍排除訊息預覽（見上），既有前端本來就對 `null` 顯示「（無）」占位文字 |
+
+**時間戳記有效性也是採信條件之一（先前版本遺漏，這次補上）**：`startedAt`／`lastActiveAt` 解析出的 `TrajectoryPayload.field 3`／`field 7` 若不是有效的 `Timestamp`（巢狀的 `seconds`／`nanos` 欄位缺失、型別不對、或轉出的日期是 `Invalid Date`），不能讓這筆記錄帶著無效時間繼續產生 session——前端排序、時間範圍篩選、久未使用判定全部依賴這兩個欄位是合法的 ISO 時間字串，無效時間會讓這些邏輯靜默出錯（`Invalid Date` 參與排序比較、或永遠/永不落入某個時間分桶），而不是拋出看得到的錯誤。因此**時間戳記能否解出有效日期，是跟 UUID／標題／URI 同等級的採信條件**：任一時間戳記解析失敗，整筆記錄視同結構指紋比對失敗，計入 `skipped`，不產生 session。測試計畫需新增一則「`created_at`／`updated_at` 的巢狀 `seconds`／`nanos` 欄位缺失或型別錯誤」的 fixture，驗證這種情況下記錄被判定失敗，而不是帶著 `Invalid Date` 產生 session。
 
 ### Antigravity 與既有 UI／續接契約的整合缺口（先前規劃遺漏，本次補上）
 
 先前版本的規劃只談到「`scanAntigravity()` 回傳的 session 併入既有 `sessions` 陣列」，但實際檢查現有前端程式碼後發現：**現有 UI 與續接指令是寫死只認兩種工具**，Antigravity session 混進去會直接壞掉，不是自動相容。具體要處理：
 
-- **`buildResumeCommand(tool, cwd, sessionId)`**（後端 `session-dashboard.js:43`）與前端 `<script>` 裡的同邏輯複製品（`tool === 'codex' ? 'codex resume' : 'claude --resume'`）：目前只有二分支，任何非 `codex` 的 tool 值都會被誤判成走 `claude --resume`。Antigravity 必須新增自己的分支，不能落到 else。
+- **`buildResumeCommand(tool, cwd, sessionId)`**（後端 `session-dashboard.js:43`）與前端 `<script>` 裡的同邏輯複製品（`tool === 'codex' ? 'codex resume' : 'claude --resume'`）：目前只有二分支，任何非 `codex` 的 tool 值都會被誤判成走 `claude --resume`。**這裡先前的措辭容易誤導**——不是「在 `buildResumeCommand` 裡新增 Antigravity 分支」：這個函式的簽章 `(tool, cwd, sessionId)` 完全沒有 exe 路徑的位置，而 Antigravity 的指令組成方式（`& '<exe>' '<folder>'`，見下方 PowerShell escaping 小節）跟 `buildResumeCommand` 產出的 `Set-Location ...; claude --resume <id>` 形狀也完全不同，硬塞進同一個函式只會讓兩種不相干的命令格式混在一起、難以測試。正確做法是**前端與後端都改成三分支判斷**（`s.tool === 'antigravity'` 時完全不呼叫 `buildResumeCommand`，改呼叫一個新的、簽章不同的函式，例如 `buildOpenFolderCommand(exePath, cwd)`），`buildResumeCommand` 本身維持原本二分支不變，只需確保呼叫端（`createCopyButton`／`createHideButton` 之外的接續按鈕邏輯）根據 `tool` 分流到正確的函式，而不是讓 `buildResumeCommand` 自己長出第三個分支。
 - **續接方式本身需要重新定義**：這台機器上只找到 Antigravity 的 GUI 執行檔（`Antigravity IDE.exe`，實測路徑為 `%LOCALAPPDATA%\Programs\Antigravity IDE\Antigravity IDE.exe`），沒有查到任何能像 `claude --resume <id>`／`codex resume <id>` 那樣「直接跳轉到指定對話」的命令列參數——這是**未驗證假設**：Antigravity 可能根本沒有這種 CLI 能力。因此這次的設計決定是：Antigravity 卡片的「續接」改成「複製開啟該 workspace 資料夾」的指令，並在按鈕文字／說明上明確告知使用者「這會開啟專案資料夾，需要自行在 IDE 內找到該對話」，不能沿用「直接接續到那一句對話」的既有語意，避免使用者誤以為跟 Claude/Codex 的續接是一樣的體驗。這個指令的完整契約（先前版本只給了一個沒有定義來源的範例，這裡補上）：
   - **執行檔路徑的來源**：前端是純靜態 HTML，瀏覽器端沒有檔案系統存取能力，不可能在點擊當下才去找 exe 在哪——執行檔路徑必須在 **Node 端掃描時**（`scanAntigravity()` 內）用 `fs.existsSync` 探測 `%LOCALAPPDATA%\Programs\Antigravity IDE\Antigravity IDE.exe` 這個已知安裝位置，探測到才把路徑寫進該筆 session 的資料（例如 `s.antigravityExePath`）隨 HTML 一併嵌入；探測不到則該筆 session 完全不產生「續接」按鈕，只顯示 workspace 資料夾路徑的純文字供使用者自行處理——這是「誠實跳過」原則在這個子功能上的具體應用，而不是硬產生一個很可能執行不了的指令。
+
+    **這個規則必須實際接到現有渲染程式碼，不能只是文字描述（先前版本遺漏，這次補上）**：現有 `renderCard(s, container, options)` 與 `renderQuickResume()` 兩處都是**無條件**呼叫 `card.appendChild(createCopyButton(s))`——對 Claude/Codex 這是對的（一定產得出續接指令），但 Antigravity 的續接按鈕依賴 `s.antigravityExePath` 是否存在。兩個渲染路徑都必須改成：`s.tool === 'antigravity' && !s.antigravityExePath` 時跳過建立續接按鈕（改渲染純文字路徑），其餘情況維持原本無條件呼叫——否則就算 `scanAntigravity()` 正確地不寫入 `antigravityExePath`，前端仍會呼叫 `buildResumeCmd(s)` 對一個 `undefined` 的 exe 路徑組出一句執行不了、甚至可能落回 `claude --resume` 語意的指令。測試計畫需在 `renderCard`／`renderQuickResume` 兩個路徑各自涵蓋「有 `antigravityExePath`」與「沒有」兩種情境，斷言後者不產生可點擊的續接按鈕。
   - **PowerShell escaping**：既有 `buildResumeCommand` 已經用單引號＋`escapePowerShellSingleQuoted`（把 `'` 加倍）來組 `Set-Location -LiteralPath '<safeCwd>'`，理由寫在前端程式碼註解裡——雙引號字串在 PowerShell 裡會做變數／反引號展開，資料夾名稱若含 `$` 或反引號就會讓指令跑掉。Antigravity 的開啟資料夾指令必須沿用同一套單引號跳脫方式，對執行檔路徑與 workspace 路徑兩個字串都套用 `escapePowerShellSingleQuoted`，例如 `& '<跳脫後的 exe 路徑>' '<跳脫後的資料夾路徑>'`，不能像先前草稿那樣用雙引號。
 - **前端篩選器與徽章**：`tool` 篩選下拉選單目前只有 `all`／`claude-code`／`codex` 幾個選項，需要新增 `antigravity`；工具徽章的樣式表也需要新增第三種顏色/文字。
 
@@ -170,12 +208,16 @@ Google Antigravity（VS Code fork）的本機資料分散在 `~/.gemini/antigrav
 
 1. **單筆對話層級 try/catch**：每筆 trajectory 的解析獨立包裹，失敗只讓這一筆退回「跳過並計入 skipped 計數」，比照現有 `scanned/skipped` 統計模式，不中斷其餘筆數的處理。
 2. **欄位層級的格式驗證閘門，與「單筆結構指紋比對」的關係（修正先前版本的自相矛盾）**：先前版本這裡寫「路徑沒抓到 → 歸類雜項」，聽起來像是這筆 trajectory 還會被保留、只是沒有 cwd；但這跟上一節「單筆結構指紋比對」明確要求的「四個欄位只要有一個對不上，整筆記錄視為解析失敗、不採信、不使用」互相矛盾——同一種輸入（URI 驗證失敗）不能同時對應「保留為雜項」跟「整筆丟棄」兩種結果。**以結構指紋比對的規則為準，修正這裡的敘述**：UUID／路徑／第二個 UUID／標題形狀四個欄位任一個沒通過格式驗證，代表整筆 trajectory 沒通過結構指紋比對，直接視為解析失敗、計入 `skipped`，不使用這筆記錄裡任何欄位（不會有「路徑沒過但保留其他欄位退到雜項」這種部分採信的情況）——因為結構指紋比對存在的前提，就是任一欄位對不上時，連原本看似正常的其他欄位也不再可信。「歸類雜項」只適用於 Claude Code／Codex 既有的、cwd 本身就是家目錄的情況（見 CONTEXT.md「雜項」定義），跟 Antigravity 這裡「驗證失敗」是兩件不同的事，不應該混用同一個詞彙。
-3. **環境相依性的顯式檢查，且明確規定檢查順序（先前版本遺漏順序，這次補上）**：`node:sqlite` 是較新版 Node.js 才有的內建模組（這個 repo 目前沒有在任何地方宣告最低 Node 版本要求），且需要用 `{ readOnly: true }` 開啟 `state.vscdb`／`*.db`（這些檔案可能正被執行中的 Antigravity IDE 佔用，唯讀開啟避免鎖定或意外寫入）。**順序很重要**：判斷「沒裝」與「裝了但還沒有 `state.vscdb` 檔案」這兩種情況，只需要 `fs.existsSync`（純檔案系統檢查），完全不需要用到 `node:sqlite`——必須先做完這兩層純檔案系統檢查，確認 `state.vscdb` 這個檔案本身真的存在之後，才需要 `require('node:sqlite')` 去開啟它查詢；如果順序反過來（一開始就不分青紅皂白先 `require('node:sqlite')`），會導致「這台機器根本沒有 Antigravity 或還沒建立這個檔案」跟「`node:sqlite` 模組本身不可用」這兩種情況被錯誤地混在一起判斷，而後者才是真正該算 `sourceError: true` 的組合情境（`state.vscdb` 檔案確實存在，但因為 `node:sqlite` 不可用而讀不到裡面的內容——檔案存在代表資料很可能就在裡面，只是這台機器現在讀不到，跟「還沒有資料」語意不同）。`require('node:sqlite')` 本身必須包在 try/catch 裡（不能是模組頂層直接 `require`，否則版本不支援時會在載入 adapter 檔案當下就拋錯，跳過所有後續 try/catch）。測試計畫需新增一則「`state.vscdb` 檔案確實存在，但模擬 `require('node:sqlite')` 拋錯」的情境，斷言結果是 `sourceError: true`（不是 `false`），驗證這個判斷順序真的有被實作出來，而不是被誤判成「還沒有資料」。
+3. **環境相依性的顯式檢查，且明確規定檢查順序（先前版本遺漏順序，這次補上）**：`node:sqlite` 是較新版 Node.js 才有的內建模組（這個 repo 目前沒有在任何地方宣告最低 Node 版本要求），且需要用 `{ readOnly: true }` 開啟 `state.vscdb`／`*.db`（這些檔案可能正被執行中的 Antigravity IDE 佔用，唯讀開啟避免鎖定或意外寫入）。**順序很重要**：判斷「沒裝」與「裝了但還沒有 `state.vscdb` 檔案」這兩種情況，只需要 `fs.existsSync`（純檔案系統檢查），完全不需要用到 `node:sqlite`——必須先做完這兩層純檔案系統檢查，確認 `state.vscdb` 這個檔案本身真的存在之後，才需要 `require('node:sqlite')` 去開啟它查詢；如果順序反過來（一開始就不分青紅皂白先 `require('node:sqlite')`），會導致「這台機器根本沒有 Antigravity 或還沒建立這個檔案」跟「`node:sqlite` 模組本身不可用」這兩種情況被錯誤地混在一起判斷，而後者才是真正該算 `sourceError: true` 的組合情境（`state.vscdb` 檔案確實存在，但因為 `node:sqlite` 不可用而讀不到裡面的內容——檔案存在代表資料很可能就在裡面，只是這台機器現在讀不到，跟「還沒有資料」語意不同）。`require('node:sqlite')` 本身必須包在 try/catch 裡（不能是模組頂層直接 `require`，否則版本不支援時會在載入 adapter 檔案當下就拋錯，跳過所有後續 try/catch）。開啟的 `DatabaseSync` 連線必須在 `try/finally` 裡 `close()`，不能只在成功路徑上關閉——查詢失敗、`value` 型別不對等任何一步拋例外時都要確保連線被釋放，否則重複執行 `main()`（例如 `SessionStart` hook 每次新開對話都會跑）會逐次留下未關閉的檔案控制代碼。測試計畫需新增一則「`state.vscdb` 檔案確實存在，但模擬 `require('node:sqlite')` 拋錯」的情境，斷言結果是 `sourceError: true`（不是 `false`），驗證這個判斷順序真的有被實作出來，而不是被誤判成「還沒有資料」。
+
+   **這個功能隱含一個先前沒有明確宣告的 Node 版本門檻（先前版本遺漏，這次補上）**：`node:sqlite` 在 Node 22.5 才以實驗性旗標形式引入，要到 Node 24 才不需要 `--experimental-sqlite` 即可直接使用——本文件所有真機驗證都在 Node v24.18.0 上進行。這代表低於 Node 24 的環境，`require('node:sqlite')` 一定會拋錯，正確地觸發 `sourceError: true`，但這種情況的根因是「執行環境版本太舊」，不是「Antigravity 資料讀取失敗」，兩者目前共用同一個 `sourceError: true` 訊號，前端警告文字無法區分。既有 Claude Code／Codex 兩個 adapter 完全沒有這種執行環境版本依賴，這是 Antigravity adapter 新引入、先前版本沒有明確聲明的限制——部署說明（`docs/deploy-log.md`）與使用者可見的說明文字裡需要明確寫出「Antigravity 功能需要 Node 24 以上」，避免使用者在舊版 Node 上看到 `sourceError: true` 時誤以為自己的 Antigravity 資料損毀。
+
+   **與既有 `docs/plans/2026-08-02-session-dashboard-plan.md:13`「Node.js >= 18 required」的關係（需要明確調和，不是互相矛盾）**：既有那份計畫講的是整個工具的最低門檻，當時只用到 `node:fs`／`node:path`／`node:os`／`node:crypto`／`node:child_process`／`node:test`，這些在 Node 18 都能用，那個門檻本身沒有錯、不需要調高——Claude Code／Codex 掃描在 Node 18～23 上完全正常運作。Antigravity adapter 是在既有門檻之上疊加的**額外、僅限這個來源**的需求：Node 18～23 上 Antigravity 會誠實回報 `sourceError: true`（優雅降級，不影響 Claude/Codex 資料），只有 Node 24 以上才能真正讀到 Antigravity 資料。這不是把全專案門檻改成 24，而是「整個工具最低需要 18，但 Antigravity 這個來源額外需要 24」——兩份文件都要用這個說法互相參照，而不是各自宣告一個看起來衝突的絕對版本號。
 4. **Antigravity adapter 整體 try/catch，且區分「沒裝」「裝了但還沒有資料」「裝了但讀取失敗」三種情況，並明確定義從 adapter 到畫面的完整串接路徑**：`scanAntigravity()` 最外層包一層 try/catch，明確定義三種結果（先前版本只談了頭尾兩種，中間這種「合法的空狀態」先前版本沒有明確定義，這次補上）：
 
    - **沒裝**：`~/.gemini/antigravity` 與 Antigravity IDE userData 兩個目錄都不存在 → `{ sessions: [], skipped: 0, sourceError: false }`（誠實代表「這台機器沒有安裝 Antigravity」）。
    - **裝了但還沒有 trajectory 資料（合法的空狀態，不是錯誤）**：上述目錄存在，但 (a) `state.vscdb` 檔案本身不存在，或 (b) `state.vscdb` 存在且能正常開啟查詢，但 `SELECT value FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.trajectorySummaries'` 查不到任何一列 → 這兩種情況都代表「使用者裝了 Antigravity、但目前為止沒有任何對話被同步寫進這個 key」（剛安裝、或裝了但從未真正開始一次對話），是完全合法、預期得到的空狀態，**不是錯誤**，回傳 `{ sessions: [], skipped: 0, sourceError: false }`，跟「沒裝」給同一種誠實但空的結果，不應該讓使用者看到警告訊息。
-   - **裝了、有資料，但讀取過程中真的失敗**：`state.vscdb` 存在、`ItemTable` 裡也查得到 `trajectorySummaries` 這一列，但後續任何一步失敗——`value` 不是預期的文字型別、`node:sqlite` 模組不可用（見上一點的順序規則）、資料庫檔案損毀或被鎖定導致開啟/查詢本身就拋例外、或是 protobuf bytes 完全無法用 walker 解析出任何一筆通過結構指紋比對的合法 trajectory（見下方整批一致性檢查，0% 通過率是這裡的極端情況）——這代表「資料很可能存在，但讀不出來」，跟前一種「還沒有資料」在语意上完全不同，**不能回傳跟前兩種一樣的結果**，回傳 `{ sessions: [], skipped: 0, sourceError: true }`。
+   - **裝了、有資料，但讀取過程中真的失敗**：`state.vscdb` 存在、`ItemTable` 裡也查得到 `trajectorySummaries` 這一列，但後續任何一步失敗——`value` 不是預期的文字型別、`node:sqlite` 模組不可用（見上一點的順序規則）、資料庫檔案損毀或被鎖定導致開啟/查詢本身就拋例外、或是 protobuf bytes 完全無法用 walker 解析出任何一筆通過結構指紋比對的合法 trajectory（見下方整批一致性檢查，0% 通過率是這裡的極端情況）——這代表「資料很可能存在，但讀不出來」，跟前一種「還沒有資料」在语意上完全不同，**不能回傳跟前兩種一樣的結果**，回傳 `{ sessions: [], sourceError: true }`，`skipped` 的值**與下方「整批一致性檢查」的契約一致**：等於這次掃描到的候選 trajectory 總筆數（不是 `0`——`0` 會讓使用者以為「什麼都沒掃到」，但實際上是掃到了、只是全部驗證失敗，兩者對使用者的意義不同，`skipped` 要誠實反映後者）。這裡先前版本寫成 `skipped: 0` 是本文件內部不一致的地方，已修正為跟整批一致性檢查同一套契約，避免實作者兩邊各實作一種行為。
 
      **「base64 decode 失敗」不是獨立的偵測手段（先前版本的錯誤假設，這次修正）**：先前版本把「base64 decode 失敗」當成一個會拋例外、可以直接 try/catch 抓到的獨立失敗情境，但這是錯的——**已用真實 Node 環境驗證過，`Buffer.from(str, 'base64')` 對非法字元或截斷輸入完全不會拋錯**（例如 `Buffer.from('not@@base64', 'base64')` 不拋例外，只會安靜跳過不合法字元、回傳它能拼湊出的任意 bytes；`Buffer.from('%%', 'base64')` 回傳長度 0 的空 buffer；沒有一種輸入會讓這行程式碼拋出例外）。所以「value 損毀」不能靠 base64 decode 這一步的 try/catch 偵測，真正能偵測到問題的地方，是 decode 出來的（可能是垃圾的）bytes 餵進 walker 之後，**找不到任何一筆通過單筆結構指紋比對的 trajectory**——這正好就是下方「整批一致性檢查」在通過率 0% 時的極端情況，不需要另外設計一個獨立的「base64 失敗」分支，這兩者本來就是同一個機制的自然延伸。
 
@@ -191,6 +233,17 @@ Google Antigravity（VS Code fork）的本機資料分散在 `~/.gemini/antigrav
 
 **`skippedCount` 也必須把 Antigravity 算進去（先前版本遺漏）**：現有 `main()` 是 `const skippedCount = claudeResult.skipped + codexResult.skipped;`，只加了兩個來源。Antigravity adapter 一樣會回傳 `skipped`（第 1 層單筆 try/catch、以及結構指紋比對沒通過的筆數都計入），這個數字必須一併加進總數——`const skippedCount = claudeResult.skipped + codexResult.skipped + antigravityResult.skipped;`——否則 Antigravity 這邊被跳過的記錄不會反映在既有「已跳過 N 個異常檔案」的提示文字裡，等於這部分的「誠實跳過」訊息被漏報，違反核心原則。
 
+**`skippedDetails` 也要一併補上，且必須是具體、可實作的契約（先前版本留白，這次補上明確定義）**：本文件寫成之後、實作前，`skippedCount` 已經在 Claude/Codex 兩個既有 adapter 上進一步擴充為 `skippedDetails`——每筆跳過的記錄額外帶 `{tool, filePath, reason, rawPreview, sizeBytes, mtime}`。既有前端 renderer（`createSkippedEntry`）**無條件**讀取 `detail.filePath`／`detail.reason` 並直接串進 `textContent`——這兩個欄位若是 `undefined`，畫面會顯示成字面上的 `[antigravity] undefined`，是一個真實會發生的顯示 bug，不是理論風險。
+
+Antigravity 沒有「一筆 trajectory 對應一個檔案」這種關係（`state.vscdb` 是所有 trajectory 共用的單一檔案），所以不能直接沿用 Claude/Codex 那套「`filePath` 是這筆 session 自己的檔案」的語意，也不套用既有的 `buildSkippedDetail(tool, filePath, err)` 共用函式（那個函式會對 `filePath` 做 `fs.statSync`／讀取檔頭 bytes 當預覽，對 Antigravity 的「filePath」沒有意義，硬套用只會讀到 `state.vscdb` 自己的大小/內容，而不是任何一筆 trajectory 的資訊）。Antigravity adapter 要自己組出 `skippedDetails` 物件，不透過那個共用函式，欄位定義如下：
+
+- `tool`：固定 `'antigravity'`。
+- `reason`：具體失敗原因（例如「base64 形狀不符」「結構指紋比對失敗：workspace URI 格式不符」「timestamp 無效」），不可為 `undefined`。
+- `filePath`：**這裡刻意不是真實檔案路徑，而是一段人類可讀的識別字串**——已知 `TrajectorySummary.field 1`（outer UUID）本身在進入雙層 base64／指紋比對之前就能獨立解析，即使後續 `TrajectoryPayload` 驗證失敗，這個 UUID 通常還在，所以格式為 `` `${stateVscdbPath}（trajectory ${outerUuid}）` ``；連 outer UUID 都解析失敗的極端情況（例如最外層 protobuf 本身就損毀），格式退為 `` `${stateVscdbPath}（trajectory UUID 也解析失敗）` ``——兩種情況 `filePath` 都是一個非 `undefined` 的字串，且盡量帶有可以跟其他失敗記錄區分的資訊。
+- `rawPreview`／`sizeBytes`／`mtime`：固定 `null`（既有前端已經對 `mtime` 做 falsy 檢查跳過整個區塊、對 `rawPreview` 有 `|| '（無法讀取）'` 的預設值，`null` 不會產生顯示 bug）。
+
+測試計畫需新增一則「Antigravity 跳過清單顯示」的 DOM 測試，用上述形狀的 fixture 驗證畫面不會出現字面上的 `undefined`。
+
 **前端渲染時兩則警告訊息共存的處理（先前版本遺漏，這次補上）**：既有 `#skipped-warning` 是單一 DOM 元素，既有邏輯是 `if (DATA.skippedCount > 0) { document.getElementById('skipped-warning').textContent = '已跳過 ' + ... }` 這種直接覆寫 `textContent` 的寫法。若照原計畫單純加一個對稱的 `if (DATA.antigravitySourceError) { ... textContent = ... }`，當兩個條件同時成立時，後執行的 `if` 會直接覆寫掉前一個訊息，使用者只會看到其中一則警告——這是先前版本沒考慮到的真實 bug。修正做法：改成先收集適用的訊息到一個陣列，兩個 `if` 都只做 `warnings.push(...)`，最後統一 `if (warnings.length > 0) { document.getElementById('skipped-warning').textContent = warnings.join('；'); }`——共用同一個既有 DOM 元素，不需要新增元素或改版面，兩則訊息用「；」串接同時顯示。測試計畫需新增一則「`skippedCount > 0` 與 `antigravitySourceError` 同時為真時，兩則警告文字都出現在渲染結果中」的 DOM 測試，覆蓋這個先前遺漏的共存情境。
 
 這條路徑（adapter 回傳值 → `main()` 組進 `meta` → `buildHtml` 序列化進 `DATA` → 前端讀 `DATA` 並渲染警告文字）每一段銜接都要各自被測試覆蓋，不能只測 adapter 自己回傳的欄位對不對（見下方測試計畫的對應項目），否則 adapter 測試全綠，畫面上卻沒有真的顯示警告這種「串接漏接」的落差不會被任何測試抓到。
@@ -205,7 +258,7 @@ Google Antigravity（VS Code fork）的本機資料分散在 `~/.gemini/antigrav
 - **protobuf walker 的純函式測試**：用手動建構的、已知內容的 byte buffer（不依賴真實 `state.vscdb`，避免測試綁定使用者本機資料）驗證能正確解出巢狀欄位；並用「刻意打亂欄位編號」的 fixture 驗證解析失敗時回傳「解析失敗」而不是拋錯或吐出垃圾值。另需涵蓋 `complete` 旗標：正常走訪到子區塊結尾 → `complete: true`；四個欄位都已收集到、但子區塊本身被人為截斷在其後 → `complete: false` 且該筆記錄整體判定失敗。
 - **base64 形狀前置檢查**：涵蓋合法 base64（含結尾 `=`／`==` padding）、內容混入非法字元（例如插在合法字串前後）、完全不是 base64 的隨機文字三種情況，驗證只有第一種通過前置檢查、後兩種都在 decode 之前就被判定為「讀取失敗」而不是被 `Buffer.from` 靜默吞掉非法字元後意外解出可用資料。
 - **URI 轉換與驗證**：涵蓋 `file:///c:/...`、`file:///c%3A/...`、包含中文/符號的路徑、格式不符（不是 `file://` 開頭、drive letter 前綴缺失）、`decodeURIComponent` 會拋錯的截斷編碼字串等案例。
-- **UUID 交叉比對**：格式正確但目錄下找不到對應檔案時必須判定為失敗；格式正確且檔案存在時必須通過。
+- **雙層 base64 解碼**：涵蓋外層 `TrajectorySummary.field 2` 正確解出第二層 base64 字串、第二層再解出正確 `TrajectoryPayload` bytes 的完整路徑；以及任一層 base64 形狀檢查失敗時的行為（見上方「base64 形狀前置檢查」）。**不再測試「UUID 是否對應到 `conversations/` 真實檔案」**——這項檢查已確認在真機資料上不成立而拿掉（見規劃內文），保留會讓測試對著一個已知不可靠的假設斷言。
 - **單筆結構指紋比對**：至少三種 fixture——(a) 四個欄位（UUID、標題、第二個 UUID、URI）全部符合預期形狀 → 整筆採信；(b) 只有 URI 欄位單獨對不上、其餘三個仍正常 → 整筆判定失敗（不能只丟棄 URI、卻仍採信同一筆的其他欄位，因為結構指紋比對的前提就是「同一筆記錄的欄位若有一個對不上，代表整體樣板可能已經改變，不該再信任這筆的任何欄位」）；(c) 四個欄位全部對不上 → 整筆判定失敗。
 - **整批一致性檢查**：構造一批「多數記錄通過單筆結構指紋比對」與一批「多數記錄未通過」的合成資料，驗證只有後者會回傳 `sourceError: true`、`sessions: []`、`skipped` 等於掃描到的總筆數（不產生任何 session，也不會有任何一筆落到雜項），前者則逐筆正常採信、正常產生對應的 session。
 - **`scanAntigravity` 整合測試**：比照 `scanClaudeCode`／`scanCodex` 既有測試的做法，用暫存目錄構造假的 `.gemini/antigravity`／`Antigravity IDE` 結構，至少涵蓋五種情境並各自斷言對應的 `sessions`／`skipped`／`sourceError`：(a) 兩個根目錄都不存在 → 沒裝，`sourceError: false`；(b) 目錄存在但 `state.vscdb` 不存在 → 還沒有資料，`sourceError: false`；(c) `state.vscdb` 存在、可正常查詢，但查不到 `trajectorySummaries` 這一列 → 還沒有資料，`sourceError: false`；(d) `state.vscdb` 存在、查得到該列，但 `value` 內容損毀（例如不是合法 base64，或 decode 後的 bytes 无法被 walker 解析出任何合法 trajectory）→ 讀取失敗，`sourceError: true`；(e) 正常案例（真實可解析的資料）→ 正常產生 session。(b)(c) 兩種必須明確斷言 `sourceError` 為 `false`（不是 `true`），驗證「還沒有資料」不會被誤判成「讀取失敗」而顯示不必要的警告給剛安裝、還沒開始使用 Antigravity 的使用者。
@@ -213,6 +266,7 @@ Google Antigravity（VS Code fork）的本機資料分散在 `~/.gemini/antigrav
 - **端到端驗證不能只靠手工 fixture／mock**：手工建構的 protobuf bytes 與 mock 過的 SQLite 呼叫，就算全部通過測試，仍不能證明 production 那條「`node:sqlite` 開 `state.vscdb` → `SELECT value FROM ItemTable WHERE key = ...` → `value` 先 `toString('utf8')` 再 base64 decode → walker 解析」的真實路徑本身是接對的（例如：SQL 拿到的 row 是 `undefined`、`value` 型別不是預期的文字、base64 decode 前少做了一次轉換等，都不會被 mock 過的測試發現）。因此在自動化測試之外，實作完成時至少要用一份**真實存在的 `state.vscdb`**（開發機上已有）手動跑過一次完整流程並肉眼核對結果（例如比對輸出的 workspace 路徑與資料夾名稱是否對得上使用者自己認得的專案），做為自動化測試涵蓋不到的最後一道確認，並在 `docs/deploy-log.md` 記錄這次人工核對的結果——這是既有專案「肉眼瀏覽器 QA 留給人工確認」慣例的延伸,不是新發明的流程。
 - **`sourceError` 從 adapter 到畫面的完整串接測試（不能只測 adapter 自己回傳的欄位）**：至少一個測試比照現有 `main --hide` 那類整合測試的做法，構造一個「目錄存在但 `state.vscdb` 損毀」的假環境，直接呼叫 `main()`，驗證產出的 HTML 字串裡确實含有 `meta.antigravitySourceError`／`DATA.antigravitySourceError` 序列化後的內容；再用 `runDashboardScript` 額外驗證當 `DATA.antigravitySourceError` 為真時，前端確實渲染出警告文字的 DOM 元素——涵蓋 `main()` 組 `meta`、`buildHtml` 序列化進 `DATA`、前端讀取並渲染三段銜接，避免「adapter 測試全綠但畫面沒有警告」這種串接漏接不被任何測試發現。
 - **前端三工具整合測試**：擴充既有的 `runDashboardScript` DOM 測試，驗證三種 `tool` 值都能被篩選下拉選單選取、`antigravity` session 的續接按鈕產生的是「開啟資料夾」指令而非誤用 `claude --resume`、以及三種工具徽章都有各自對應的樣式。
+- **「開啟資料夾」指令的真機行為驗證（自動化測試涵蓋不到，先前版本遺漏，這次補上）**：`Antigravity IDE.exe <folder>` 能不能真的開啟指定 workspace，目前仍是**未驗證假設**（見上方「續接方式本身需要重新定義」小節）；自動化測試只能驗證產出的命令字串格式正確，無法證明執行後真的會開啟正確的資料夾。實作完成時，至少要手動複製一次產生的指令、貼到 PowerShell 實際執行，確認 Antigravity 開啟的是命令裡指定的那個 workspace 資料夾（不是開啟到別的專案、或完全沒反應），並涵蓋一個路徑含空白字元的真實資料夾（驗證 PowerShell 單引號跳脫在真實執行環境下真的有效，不是只在字串比對層級正確），把結果記錄進 `docs/deploy-log.md`——這是既有專案「肉眼瀏覽器 QA 留給人工確認」慣例在這個子功能上的延伸。若真機驗證發現 `Antigravity IDE.exe` 不接受資料夾路徑參數（假設不成立），需要回頭重新設計這個子功能，不能假設自動化測試通過就代表這個功能真的可用。
 
 模組化拆分（規劃一）與 Antigravity 開發（規劃二）兩者的驗證標準不同，不能混用同一套「141 筆全過」的標準：模組化只要求「維持全綠、不改斷言」，Antigravity 則需要上述新測試先紅後綠，才能證明新功能本身是對的。
 
@@ -221,5 +275,21 @@ Google Antigravity（VS Code fork）的本機資料分散在 `~/.gemini/antigrav
 - Antigravity 的訊息預覽（首/末則訊息內容）——本輪明確排除，未來若要做，需要另外解開 protobuf BLOB 裡的訊息內容格式，屬於獨立的可行性調查。
 - Claude Code／Codex 自身的 session 保留機制（`cleanupPeriodDays` 預設 30 天自動刪除、Codex 的 archived_sessions）——本工具刻意不做競爭的刪除機制，只做本機端的顯示層隱藏（`session-dashboard-hidden.json`），這是先前已核准的既定決策，此文件只是記錄現況，不重新開放討論。
 - 「原始碼與部署副本是兩個不同路徑、改完要手動同步」這件事本身的既有落差（例如要不要改成自動化部署腳本）——這輪不處理，維持手動 `cp` 的既有工作模式。**但注意這不等於「複製哪些檔案」也維持不變**：模組化拆出 `src/adapters/` 後，複製的內容必須包含這個新目錄，是「規劃一：模組化對部署流程的影響」小節裡明確要求的強制項目，不屬於這裡排除的範圍。
+- **Antigravity 的另外兩個候選來源**：`.system_generated/logs/transcript.jsonl`（逐字使用者輸入，覆蓋率 2/10）可作為未來訊息預覽的候選來源；`winters27/google-antigravity-export` 走的本機 HTTP API 路線（`GetAllCascadeTrajectories`／`GetCascadeTrajectorySteps`）資料更完整，但需要 Antigravity 正在執行中，跟本工具「離線掃描靜態檔案」的既定方向衝突，這輪不採用，留待未來評估是否要為 Antigravity 開一條不同於 Claude/Codex 的「即時資料」路徑。
 
-<!-- codex-peer-reviewed: 2026-08-03T11:51:52Z rounds=13 verdict=approved -->
+## 本次修訂摘要（2026-08-03 第二次修訂）
+
+使用者要求「先上網研究社群是否已經摸清 Antigravity 的資料結構」後，對照 [`ag-donald/Antigravity-Database-Manager`](https://github.com/ag-donald/Antigravity-Database-Manager) 公開的逆向工程 schema，重新解碼這台機器真實的 `state.vscdb`，發現並修正了初版規劃兩個實質性錯誤：
+
+1. **少了一層 base64 包裝**：`TrajectorySummary.field 2` 不是直接的巢狀 protobuf，而是要再做一次 `Buffer.from(str, 'base64')` 才能拿到真正的 `TrajectoryPayload`。少了這一步，後面所有欄位位置都會建立在解析錯誤位置的 bytes 上。
+2. **workspace 路徑的欄位位置猜錯**：初版說是 `depth4/field7`，實際上 `field 7` 是 `updated_at` 時間戳，真正的路徑在巢狀的 `field 9`（`WorkspaceInfo`）裡的 `field 1`。
+
+以及一個原本設計的安全機制在真實資料上不成立：「UUID 必須對應到 `conversations/` 目錄下的真實檔案」這項驗證，拿這台機器 8 筆真實資料的三組 UUID 逐一比對，**沒有一筆對得上**（很可能是這台機器的 `conversations/` 資料夾經歷過資料復原/搬移，詳見規劃內文），已經拿掉這項驗證。
+
+**優點**：標題欄位（先前排除、這次改為採用）在測試的 8 筆真實資料裡 100% 有值，且是 Antigravity 自己產生的乾淨標題（例如「整理並上傳專案至 GitHub」），比先前規劃仰賴的 `task.md.metadata.json`（覆蓋率 50%）可靠得多；額外拿到 branch／git remote 資訊（先前誤判「沒有分支概念」）；時間戳記改用 payload 自帶欄位，不再依賴常常對不上的實體檔案。
+
+**缺點／取捨**：拿掉「對應到真實檔案」這層驗證後，安全網完全依賴結構指紋比對（欄位形狀＋巢狀關係＋`complete` 旗標），比初版設計的「兩層獨立防禦」少了一層；且這次的修正同樣建立在**一台機器**的真實資料與**一份非官方**的社群逆向工程 schema 上，仍然可能有本文件目前沒發現的邊界情況——跟初版一樣，這是私有格式先天無法用客戶端檢查證明到零風險的部分，需要誠實記錄而非假裝解決。
+
+**本節尚未經過 codex-peer-review**：文末的審查標記是針對修訂前的版本，本次修訂涉及的欄位位置與驗證機制屬於實質變更，若要沿用先前「重要決策需要獨立審查」的慣例，應該在實作前再跑一輪 review，而不是逕行套用舊的審查結論。
+
+<!-- codex-peer-reviewed: 2026-08-03T11:51:52Z rounds=13 verdict=approved (內容已於 2026-08-03 第二次修訂後更新，此標記僅適用於修訂前版本，尚待重新審查) -->
