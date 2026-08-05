@@ -14,6 +14,8 @@ const {
   normalizeGroupKey,
   displayNameForCwd,
   TAIL_MESSAGE_SCAN_WINDOW,
+  deriveLastActiveAt,
+  buildSkippedDetail,
 } = require('./shared.js');
 
 // ---------------------------------------------------------------------------
@@ -151,12 +153,12 @@ function scanCodexFile(filePath, indexMap, homeDir) {
     groupKey: normalizeGroupKey(cwd, homeDir),
     displayName: displayNameForCwd(cwd),
     startedAt: stat.birthtime.toISOString(),
-    lastActiveAt: stat.mtime.toISOString(),
+    lastActiveAt: deriveLastActiveAt(tailRecords, stat.mtime.toISOString()),
   };
 }
 
 function scanCodex(codexHomeDir, realHomeDir = os.homedir()) {
-  if (!fs.existsSync(codexHomeDir)) return { sessions: [], skipped: 0 };
+  if (!fs.existsSync(codexHomeDir)) return { sessions: [], skipped: 0, skippedDetails: [] };
   const indexMap = loadCodexIndex(path.join(codexHomeDir, 'session_index.jsonl'));
   const files = [
     ...walkJsonlFiles(path.join(codexHomeDir, 'sessions')),
@@ -164,14 +166,16 @@ function scanCodex(codexHomeDir, realHomeDir = os.homedir()) {
   ];
   const sessions = [];
   let skipped = 0;
+  const skippedDetails = [];
   for (const file of files) {
     try {
       sessions.push(scanCodexFile(file, indexMap, realHomeDir));
     } catch (err) {
       skipped += 1;
+      skippedDetails.push(buildSkippedDetail('codex', file, err));
     }
   }
-  return { sessions, skipped };
+  return { sessions, skipped, skippedDetails };
 }
 
 module.exports = {

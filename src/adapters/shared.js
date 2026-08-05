@@ -132,11 +132,21 @@ function readLastJsonLines(filePath, n) {
 
 const INJECTED_DOCUMENT_MIN_LENGTH = 150;
 
+// Codex's internal auto-approval/review sub-loop replays its own tool-call history back to
+// itself as a "transcript delta" for re-review, always framed by a literal
+// ">>> TRANSCRIPT DELTA START" banner line — confirmed against 3 real sessions on this
+// machine, including one where zero log entries followed the banner ("<no retained transcript
+// delta entries>"). That rules out a "count 2+ numbered log lines" heuristic (an earlier version
+// of this check tried that, based on a hand-built example — real data shows 0-1 entries per
+// occurrence, not "repeated many times"): the ONLY thing invariant across every real case is the
+// banner line itself. This slips past the heading/tag checks above since the message opens with
+// plain prose ("The following is the Codex agent history added..."), not a heading or tag.
 function looksLikeInjectedDocument(text) {
   if (text.length < INJECTED_DOCUMENT_MIN_LENGTH) return false;
   if (/^[<#]/.test(text)) return true;
   const headingLineCount = (text.match(/^#{1,6}\s/gm) || []).length;
-  return headingLineCount >= 2;
+  if (headingLineCount >= 2) return true;
+  return />>>\s*TRANSCRIPT DELTA START/.test(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +252,72 @@ function walkJsonlFiles(rootDir, excludeDirNames = []) {
 // symmetric-to-the-head-window scan would reliably reach.
 const TAIL_MESSAGE_SCAN_WINDOW = 60;
 
+// A session file's OS mtime can be bumped by activity that isn't a new real message — e.g.
+// Claude Code's own `/resume` picker touching a session file it merely lists, or a bookkeeping
+// record with no `timestamp` field being appended — with no new conversation turn ever added.
+// Confirmed on a real session: mtime read a full day after the file's only genuine message
+// timestamps, because the only lines appended after that message were bookkeeping types
+// (`last-prompt`, `mode`) that carry no top-level `timestamp` field. Every real conversational
+// record in both tools' formats does carry one, so scanning the tail window backward for the
+// last record that has one is a truer "last active" signal than mtime; only fall back to mtime
+// when the tail window contains no timestamped record at all.
+function deriveLastActiveAt(tailRecords, fallbackIso) {
+  for (let i = tailRecords.length - 1; i >= 0; i--) {
+    const ts = tailRecords[i] && tailRecords[i].timestamp;
+    if (typeof ts === 'string') return ts;
+  }
+  return fallbackIso;
+}
+
+// ---------------------------------------------------------------------------
+// Skipped-file diagnostics
+// ---------------------------------------------------------------------------
+//
+// When a file fails to scan entirely (scanClaudeCodeFile/scanCodexFile throws), the
+// user currently has no way to tell WHICH file was dropped — only a total count. This
+// captures enough for a human to self-identify the file: its path, why it failed, and a
+// best-effort raw preview of its opening bytes (not parsed as JSON — the file already
+// failed JSON parsing, so this is deliberately just "whatever text is there").
+
+const RAW_PREVIEW_MAX_BYTES = 300;
+
+function readRawPreviewBytes(filePath, maxBytes = RAW_PREVIEW_MAX_BYTES) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(maxBytes);
+    const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+    // toString('utf8') never throws — invalid byte sequences (e.g. a chunk boundary
+    // landing mid-character, or genuinely binary content) are lossily replaced with
+    // U+FFFD rather than raising, which is fine here: this is a best-effort diagnostic
+    // preview, not a claim that the bytes are valid text.
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } catch (err) {
+    // File vanished or became unreadable between listing and this read — no preview
+    // available, not a reason to fail the whole skipped-detail entry.
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function buildSkippedDetail(tool, filePath, err) {
+  let stat = null;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (statErr) {
+    // Same vanished-file case as above — leave size/mtime as null.
+  }
+  return {
+    tool,
+    filePath,
+    reason: (err && err.message) || String(err),
+    rawPreview: readRawPreviewBytes(filePath),
+    sizeBytes: stat ? stat.size : null,
+    mtime: stat ? stat.mtime.toISOString() : null,
+  };
+}
+
 module.exports = {
   normalizePath,
   normalizeGroupKey,
@@ -256,4 +332,8 @@ module.exports = {
   readExpandingHeadRecords,
   walkJsonlFiles,
   TAIL_MESSAGE_SCAN_WINDOW,
+  deriveLastActiveAt,
+  RAW_PREVIEW_MAX_BYTES,
+  readRawPreviewBytes,
+  buildSkippedDetail,
 };

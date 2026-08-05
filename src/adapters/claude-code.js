@@ -14,6 +14,8 @@ const {
   normalizeGroupKey,
   displayNameForCwd,
   TAIL_MESSAGE_SCAN_WINDOW,
+  deriveLastActiveAt,
+  buildSkippedDetail,
 } = require('./shared.js');
 
 // ---------------------------------------------------------------------------
@@ -66,7 +68,33 @@ const CLAUDE_LAST_MESSAGE_MATCHERS = {
   isSynthetic: isSyntheticClaudeText,
 };
 
+// Claude Code's built-in `/rename` command is the user explicitly telling Claude Code (and by
+// extension us) what to call this session — a stronger, more deliberate signal than any
+// heuristic scan of the first organic message, so it takes priority when present. The result
+// isn't stored in any separate index file (checked: no sidecar file next to the session's own
+// jsonl, and `~/.claude/history.jsonl` only holds the verbatim `/rename <name>` keystroke, not a
+// canonical current name) — the ONLY place it lives is a `type: "system", subtype:
+// "local_command"` record inside the session's own transcript, with the new name inline in a
+// `<command-args>` tag. A session can be renamed more than once, so the LAST such record wins.
+const RENAME_COMMAND_PATTERN = /<command-name>\/rename<\/command-name>[\s\S]*?<command-args>([\s\S]*?)<\/command-args>/;
+
+function extractClaudeRenameTitle(records) {
+  let lastRenamed = null;
+  for (const record of records) {
+    if (record.type !== 'system' || record.subtype !== 'local_command') continue;
+    if (typeof record.content !== 'string') continue;
+    const match = RENAME_COMMAND_PATTERN.exec(record.content);
+    if (match) {
+      const renamed = match[1].trim();
+      if (renamed) lastRenamed = renamed;
+    }
+  }
+  return lastRenamed;
+}
+
 function extractClaudeTitle(records, maxScan = 20) {
+  const renamed = extractClaudeRenameTitle(records);
+  if (renamed) return renamed.slice(0, 120);
   const text = findGenuineMessageText(records.slice(0, maxScan), CLAUDE_MESSAGE_MATCHERS);
   return text === null ? null : text.slice(0, 120);
 }
@@ -116,7 +144,7 @@ function scanClaudeCodeFile(filePath, homeDir) {
     groupKey: normalizeGroupKey(effectiveCwd, homeDir),
     displayName: displayNameForCwd(effectiveCwd),
     startedAt: stat.birthtime.toISOString(),
-    lastActiveAt: stat.mtime.toISOString(),
+    lastActiveAt: deriveLastActiveAt(tailRecords, stat.mtime.toISOString()),
   };
 }
 
@@ -125,19 +153,22 @@ function scanClaudeCode(claudeHomeDir, realHomeDir = os.homedir()) {
   const files = walkJsonlFiles(projectsDir, ['subagents']);
   const sessions = [];
   let skipped = 0;
+  const skippedDetails = [];
   for (const file of files) {
     try {
       sessions.push(scanClaudeCodeFile(file, realHomeDir));
     } catch (err) {
       skipped += 1;
+      skippedDetails.push(buildSkippedDetail('claude-code', file, err));
     }
   }
-  return { sessions, skipped };
+  return { sessions, skipped, skippedDetails };
 }
 
 module.exports = {
   extractMessageText,
   isSyntheticClaudeText,
+  extractClaudeRenameTitle,
   extractClaudeTitle,
   scanClaudeCodeFile,
   scanClaudeCode,
