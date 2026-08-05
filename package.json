@@ -1,0 +1,14 @@
+{
+  "name": "session-manager-for-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "把 Claude Code / Codex CLI 的本機對話 session 整理成單一自包含 HTML 儀表板，支援搜尋、隱藏、改名與一鍵續接。",
+  "main": "src/session-dashboard.js",
+  "scripts": {
+    "test": "node --test src/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
