@@ -668,19 +668,17 @@ function buildHtml(sessions, meta = {}) {
       return "Set-Location -LiteralPath '" + safeCwd + "'; " + (s.tool === 'codex' ? 'codex resume' : 'claude --resume') + ' ' + s.id;
     }
 
-    // sessdash://resume——跟隱藏/改名同一套協議、同一個 triggerProtocolAction（見下方），
-    // 省去複製貼上這一步（見 docs/design/2026-08-05-protocol-handler-resume-action.md）。
-    function buildResumeUri(s) {
-      return buildProtocolUri('resume', { tool: s.tool, id: s.id, cwd: s.cwd, token: DATA.protocolToken });
-    }
-
     function createCopyButton(s) {
       var btn = document.createElement('button');
       btn.className = 'copy-btn';
       btn.textContent = COPY_BTN_LABEL;
       var copyResetTimer = null;
       btn.addEventListener('click', function () {
-        triggerProtocolAction(buildResumeUri(s), buildResumeCmd(s));
+        // 只複製指令到剪貼簿，不觸發 sessdash://resume 協議導覽（不自動開新終端機視窗）——
+        // 目前工作流程改成先在終端機貼上指令再手動進入 session。hide/rename 仍走協議一鍵
+        // 觸發，不受影響；後端 --handle-uri 對 resume 動作的支援原樣保留，未來要改回一鍵
+        // 只需還原這顆按鈕的行為。
+        writeClipboardBestEffort(buildResumeCmd(s));
         btn.textContent = '已複製✓';
         if (copyResetTimer) clearTimeout(copyResetTimer);
         copyResetTimer = setTimeout(function () {
@@ -716,19 +714,23 @@ function buildHtml(sessions, meta = {}) {
       return buildProtocolUri('hide', { tool: s.tool, id: s.id, token: DATA.protocolToken });
     }
 
-    // 先無條件觸發協議導覽，再用 try/catch 包住剪貼簿嘗試——剪貼簿的任何失敗形式（同步拋
-    // 出、navigator.clipboard 整個不存在、Promise reject）都不能擋住已經執行過的協議導覽，
-    // 兩者是各自獨立、盡力而為的動作，沒有先後依賴。協議尚未註冊、或使用者在瀏覽器確認視
-    // 窗按下拒絕時，剪貼簿裡仍然有原本可用的手動指令可以貼上執行。
-    function triggerProtocolAction(uri, clipboardText) {
-      location.href = uri;
+    // 剪貼簿的任何失敗形式（同步拋出、navigator.clipboard 整個不存在、Promise reject）都
+    // 不能讓呼叫端跟著出錯——這只是錦上添花的 best-effort 動作。
+    function writeClipboardBestEffort(clipboardText) {
       try {
         var p = navigator.clipboard && navigator.clipboard.writeText(clipboardText);
         if (p && typeof p.catch === 'function') p.catch(function () {});
       } catch (err) {
-        // API 不存在、或呼叫本身同步拋出——剪貼簿只是錦上添花的 best-effort，不影響上面
-        // 已經觸發的協議導覽。
+        // API 不存在、或呼叫本身同步拋出——忽略。
       }
+    }
+
+    // 先無條件觸發協議導覽，再嘗試複製剪貼簿——兩者是各自獨立、盡力而為的動作，沒有先後
+    // 依賴。協議尚未註冊、或使用者在瀏覽器確認視窗按下拒絕時，剪貼簿裡仍然有原本可用的
+    // 手動指令可以貼上執行。
+    function triggerProtocolAction(uri, clipboardText) {
+      location.href = uri;
+      writeClipboardBestEffort(clipboardText);
     }
 
     function createHideButton(s) {

@@ -3733,7 +3733,7 @@ test('buildHtml — 隱藏按鈕點擊後同時觸發 sessdash:// 協議連結�
   assert.ok(clipboardWrites[clipboardWrites.length - 1].includes('--hide codex proto-hide-id'));
 });
 
-test('buildHtml — 複製續接指令按鈕點擊後同時觸發 sessdash://resume 協議連結（含 cwd、token）與複製指令到剪貼簿', () => {
+test('buildHtml — 複製續接指令按鈕點擊只複製指令到剪貼簿，不觸發 sessdash://resume 協議導覽（不自動開新終端機視窗）', () => {
   const sessions = [
     {
       tool: 'codex', id: 'proto-resume-id', title: '測試', cwd: 'C:\\work\\a proj', branch: null,
@@ -3746,11 +3746,8 @@ test('buildHtml — 複製續接指令按鈕點擊後同時觸發 sessdash://res
   const card = findAllCards(app)[0];
   card.children.find((el) => el.tagName === 'BUTTON' && el.className === 'copy-btn').click();
 
-  assert.equal(
-    locationWrites[locationWrites.length - 1],
-    'sessdash://resume?tool=codex&id=proto-resume-id&cwd=' + encodeURIComponent('C:\\work\\a proj') + '&token=my-token-123'
-  );
-  assert.ok(clipboardWrites[clipboardWrites.length - 1].includes('codex resume proto-resume-id'), '剪貼簿複製行為仍應保留，作為備援');
+  assert.equal(locationWrites.length, 0, '不應該觸發任何 location.href 導覽');
+  assert.ok(clipboardWrites[clipboardWrites.length - 1].includes('codex resume proto-resume-id'), '仍應複製續接指令到剪貼簿');
 });
 
 test('buildHtml — 改名按鈕輸入新名稱後同時觸發 sessdash:// 協議連結（含跳脫過的 title）與複製指令到剪貼簿', () => {
